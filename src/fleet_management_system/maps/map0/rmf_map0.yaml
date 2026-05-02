@@ -1,0 +1,128 @@
+map_id: rmf_map0.yaml
+map_image: rmf_map.pgm
+map_name: 交通图
+map_origin:
+- -15.3
+- -21.6
+- 0
+map_resolution: 0.05
+map_yaml_path: rmf_map.yaml
+waypoints:
+- connections:
+  - wp_006
+  - wp_007
+  id: wp_001
+  is_charging_station: false
+  is_parking_spot: false
+  name: wp_001
+  position:
+    x: 171.47
+    y: 163.49
+    z: 0.0
+  radius: 0.5
+- connections:
+  - wp_005
+  - wp_003
+  - wp_007
+  id: wp_002
+  is_charging_station: false
+  is_parking_spot: false
+  name: wp_002
+  position:
+    x: 267.47
+    y: 185.46
+    z: 0.0
+  radius: 0.5
+- connections:
+  - wp_004
+  - wp_010
+  - wp_002
+  - wp_018
+  id: wp_003
+  is_charging_station: false
+  is_parking_spot: false
+  name: wp_003
+  position:
+    x: 358.08
+    y: 202.04
+    z: 0.0
+  radius: 0.5
+- connections:
+  - wp_003
+  id: wp_004
+  is_charging_station: true
+  is_parking_spot: true
+  name: robot1_init
+  position:
+    x: 343.81
+    y: 278.38
+    z: 0.0
+  radius: 0.5
+- connections:
+  - wp_002
+  id: wp_005
+  is_charging_station: true
+  is_parking_spot: true
+  name: robot0_init
+  position:
+    x: 259.76
+    y: 259.49
+    z: 0.0
+  radius: 0.5
+- connections:
+  - wp_001
+  id: wp_006
+  is_charging_station: false
+  is_parking_spot: false
+  name: p1
+  position:
+    x: 159.91
+    y: 225.94
+    z: 0.0
+  radius: 0.5
+- connections:
+  - wp_001
+  - wp_002
+  - wp_016
+  id: wp_007
+  is_charging_station: false
+  is_parking_spot: false
+  name: wp_007
+  position:
+    x: 223.14
+    y: 174.67
+    z: 0.0
+  radius: 0.5
+- connections:
+  - wp_003
+  id: wp_010
+  is_charging_station: false
+  is_parking_spot: false
+  name: p0
+  position:
+    x: 391.23
+    y: 207.44
+    z: 0.0
+  radius: 0.5
+- connections:
+  - wp_007
+  id: wp_016
+  is_charging_station: false
+  is_parking_spot: false
+  name: wp_016
+  position:
+    x: 227.23990662298561
+    y: 145.02187750376066
+    z: 0.0
+  radius: 0.5
+- connections:
+  - wp_003
+  id: wp_018
+  is_charging_station: false
+  is_parking_spot: false
+  name: wp_018
+  position:
+    x: 363.14798153775035
+    y: 171.1228821542073
+    z: 0.0
+  radius: 0.5

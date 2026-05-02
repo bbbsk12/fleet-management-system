@@ -1,0 +1,8 @@
+# Cancel an existing task (and its currently running navigation, if any)
+# Request
+string task_id
+---
+# Response
+bool success
+string message
+

@@ -1,0 +1,7 @@
+# Remove a robot from the fleet (release all locks, cancel tasks, clean up state)
+# Request
+string robot_id
+---
+# Response
+bool success
+string message

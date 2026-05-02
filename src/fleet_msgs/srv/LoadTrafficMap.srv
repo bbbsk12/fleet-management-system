@@ -1,0 +1,8 @@
+# Load a traffic map from file
+# Request
+string file_path  # Path to the traffic map file
+---
+# Response
+bool success
+TrafficMap map  # Loaded map data
+string message  # Error message if failed

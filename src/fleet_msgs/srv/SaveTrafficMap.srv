@@ -1,0 +1,7 @@
+# Save current traffic map to file
+# Request
+string file_path  # Path where to save the map
+---
+# Response
+bool success
+string message  # Status message

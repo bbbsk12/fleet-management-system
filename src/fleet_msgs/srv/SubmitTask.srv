@@ -1,0 +1,12 @@
+# Submit a new task
+# Request
+string waypoint_id  # Target waypoint ID
+int32 priority  # Task priority (optional, default 0)
+string robot_id  # Optional: specify robot, empty for auto-assign
+uint8 task_type  # Task type: 1=CRUISE, 2=LOAD, 3=UNLOAD, 4=SITE_SPECIFIC (default 1)
+uint32 site_code  # Business code for LOAD/UNLOAD/SITE_SPECIFIC (default 0)
+---
+# Response
+bool success
+string task_id  # Unique task ID if successful
+string message  # Error message if failed

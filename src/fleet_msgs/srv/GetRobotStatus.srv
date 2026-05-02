@@ -1,0 +1,8 @@
+# Get status of a specific robot or all robots
+# Request
+string robot_id  # Empty string to get all robots
+---
+# Response
+bool success
+RobotStatus[] robots  # List of robot statuses
+string message  # Error message if failed

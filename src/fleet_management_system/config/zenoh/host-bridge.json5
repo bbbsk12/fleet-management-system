@@ -1,0 +1,30 @@
+{
+  // Host bridge should attach to local zenohd as a client.
+  // This avoids peer/peer topology churn on startup.
+  mode: "client",
+  connect: {
+    // Replace with your Zenoh router IP:PORT (or set ZENOH_ROUTER_ENDPOINT env var)
+    endpoints: ["tcp/127.0.0.1:7447"]
+  },
+  scouting: {
+    // Keep host-side topology deterministic: rely on explicit connect endpoint.
+    multicast: { enabled: false },
+    gossip: { enabled: false }
+  },
+  plugins: {
+    ros2dds: {
+      domain: 0,
+      // Discover only local ROS 2 DDS participants on this host.
+      // Cross-host propagation is handled by zenoh links.
+      ros_automatic_discovery_range: "LOCALHOST",
+      allow: {
+        publishers: [".*"],
+        subscribers: [".*"],
+        service_servers: [".*"],
+        service_clients: [".*"],
+        action_servers: [".*"],
+        action_clients: [".*"]
+      }
+    }
+  }
+}
