@@ -15,48 +15,50 @@
 namespace fleet_manager
 {
 
-/**
- * @brief 交通地图管理器——仅负责地图加载/保存、BFS 寻路、航点查询
- *
- * 所有占用/预约/冲突检测逻辑已迁移到 OccupancyManager。
- */
+// ============================================================================
+// TrafficManager — 交通图管理、BFS 寻路、航点查询
+//
+// 职责边界: 仅负责地图数据的加载/保存、拓扑寻路和航点位姿查询。
+// 所有占用/预留/冲突检测逻辑已迁移到 OccupancyManager。
+// ============================================================================
+
 class TrafficManager
 {
 public:
   explicit TrafficManager(rclcpp::Node * node);
 
-  // ==================== 地图加载/保存 ====================
+  // ── 地图持久化 ────────────────────────────────────────────
 
+  /// 从 YAML 文件加载交通图(航点 + 连接关系 + 栅格地图元信息)
   bool load_map(const std::string & file_path);
+
+  /// 将当前交通图保存到 YAML 文件
   bool save_map(const std::string & file_path);
 
-  /// 校验航点最小间距，返回间距过近的航点对列表
-  /// @param min_spacing 最小允许间距（应大于 waypoint_acceptance_radius 的 2 倍）
+  /// 校验航点最小间距(min_spacing 应 > waypoint_acceptance_radius × 2)
   std::vector<std::pair<std::string, std::string>> validate_waypoint_spacing(
     double min_spacing) const;
 
-  // ==================== 寻路 ====================
+  // ── 寻路 ──────────────────────────────────────────────────
 
-  /// BFS 最短路径（返回航点 ID 列表）
+  /// BFS 最短路径(不考虑占用)
   std::vector<std::string> find_path(
     const std::string & from_waypoint,
     const std::string & to_waypoint);
 
-  /// 占用感知寻路：被占用的航段 cost 提高，优先选择空闲路径
-  /// @param occupied_edges 被占用的航段 edge_key 集合
-  /// @param occupied_waypoints 被占用的航点集合
+  /// 占用感知寻路: occupied 的航点/航段 cost 大幅提高, 优先选空闲路径
   std::vector<std::string> find_path_weighted(
     const std::string & from_waypoint,
     const std::string & to_waypoint,
     const std::set<std::string> & occupied_edges,
     const std::set<std::string> & occupied_waypoints);
 
-  /// 在两航点之间做线性插值路径（用于可视化/规划）
+  /// 两点间线性插值路径(用于可视化)
   std::vector<geometry_msgs::msg::Pose> plan_route(
     const std::string & from_waypoint,
     const std::string & to_waypoint);
 
-  // ==================== 航点查询 ====================
+  // ── 航点查询 ──────────────────────────────────────────────
 
   fleet_msgs::msg::TrafficMap get_map() const { return current_map_; }
 
@@ -65,25 +67,24 @@ public:
   std::vector<std::string> get_waypoint_connections(const std::string & waypoint_id) const;
   double get_waypoint_radius(const std::string & waypoint_id) const;
 
+  /// 在 max_distance 内查找距离位姿最近的航点
   std::string find_nearest_waypoint(
     const geometry_msgs::msg::Pose & pose,
     double max_distance = 2.0) const;
 
-  // ==================== 拓扑暴露（供 OccupancyManager 使用） ====================
-
-  /// 获取邻接表 waypoint_id → [connected_ids]
+  /// 导出邻接表供 OccupancyManager 使用
   std::map<std::string, std::vector<std::string>> get_adjacency_map() const;
 
-  // ==================== 航点编辑 ====================
+  // ── 航点编辑 ──────────────────────────────────────────────
 
   bool add_waypoint(const fleet_msgs::msg::Waypoint & waypoint);
   bool remove_waypoint(const std::string & waypoint_id);
 
-  // ==================== 栅格地图 ====================
+  // ── 栅格地图 ──────────────────────────────────────────────
 
   void set_occupancy_grid(const nav_msgs::msg::OccupancyGrid::SharedPtr map);
 
-  // ==================== 几何工具 ====================
+  // ── 几何工具 ──────────────────────────────────────────────
 
   double calculate_distance(
     const geometry_msgs::msg::Pose & p1,

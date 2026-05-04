@@ -8,7 +8,10 @@
 
 namespace fleet_manager
 {
-// ==================== 地图加载/保存 ====================
+
+// ============================================================================
+// 地图加载/保存
+// ============================================================================
 
 bool TrafficManager::load_map(const std::string & file_path)
 {
@@ -17,6 +20,7 @@ bool TrafficManager::load_map(const std::string & file_path)
   try {
     YAML::Node yaml = YAML::LoadFile(file_path);
 
+    // 提取地图文件所在目录（用于解析相对路径）
     size_t last_slash = file_path.find_last_of("/\\");
     if (last_slash != std::string::npos) {
       current_map_dir_ = file_path.substr(0, last_slash);
@@ -41,6 +45,7 @@ std::vector<std::pair<std::string, std::string>> TrafficManager::validate_waypoi
   std::lock_guard<std::mutex> lock(mutex_);
   std::vector<std::pair<std::string, std::string>> violations;
 
+  // 检查所有航点对之间的距离是否满足最小间距要求
   const auto & wps = current_map_.waypoints;
   for (size_t i = 0; i < wps.size(); ++i) {
     for (size_t j = i + 1; j < wps.size(); ++j) {
@@ -83,7 +88,9 @@ bool TrafficManager::save_map(const std::string & file_path)
   }
 }
 
-// ==================== Private ====================
+// ============================================================================
+// 内部工具 — Private
+// ============================================================================
 
 geometry_msgs::msg::Pose TrafficManager::get_waypoint_pose_unlocked(
   const std::string & waypoint_id) const
@@ -110,6 +117,7 @@ std::vector<geometry_msgs::msg::Pose> TrafficManager::interpolate_path(
   std::vector<geometry_msgs::msg::Pose> path;
   path.push_back(start);
 
+  // 计算起点到终点的欧氏距离，按步长等分插值
   double distance = std::sqrt(
     std::pow(end.position.x - start.position.x, 2) +
     std::pow(end.position.y - start.position.y, 2));
@@ -136,6 +144,7 @@ bool TrafficManager::check_collision(const geometry_msgs::msg::Pose & pose)
     return false;
   }
 
+  // 将世界坐标转为栅格坐标
   int x = static_cast<int>((pose.position.x - occupancy_grid_->info.origin.position.x) /
                            occupancy_grid_->info.resolution);
   int y = static_cast<int>((pose.position.y - occupancy_grid_->info.origin.position.y) /
@@ -167,7 +176,7 @@ void TrafficManager::load_from_yaml(const YAML::Node & yaml)
   map_height_ = 0;
   map_image_.clear();
 
-  // 地图元数据
+  // --- 地图元数据 ---
   if (yaml["map_resolution"]) {
     map_resolution_ = yaml["map_resolution"].as<double>();
   }
@@ -179,7 +188,7 @@ void TrafficManager::load_from_yaml(const YAML::Node & yaml)
   RCLCPP_INFO(node_->get_logger(), "Map metadata: resolution=%.3f, origin=(%.2f, %.2f), dir=%s",
               map_resolution_, map_origin_x_, map_origin_y_, current_map_dir_.c_str());
 
-  // 从 map_image 加载图像高度
+  // --- 从 map_image 加载图像高度 ---
   if (yaml["map_image"]) {
     std::string map_image = yaml["map_image"].as<std::string>();
     map_image_ = map_image;
@@ -219,7 +228,7 @@ void TrafficManager::load_from_yaml(const YAML::Node & yaml)
     RCLCPP_WARN(node_->get_logger(), "No map_image field in yaml");
   }
 
-  // 如果 map_image 加载失败，尝试从 map_yaml_path 加载
+  // --- 若 map_image 加载失败，尝试从 map_yaml_path 加载图像高度 ---
   if (map_height_ == 0 && yaml["map_yaml_path"]) {
     std::string map_yaml_path = yaml["map_yaml_path"].as<std::string>();
 
@@ -267,13 +276,14 @@ void TrafficManager::load_from_yaml(const YAML::Node & yaml)
   RCLCPP_INFO(node_->get_logger(), "Map metadata: resolution=%.3f, origin=(%.2f, %.2f), height=%d",
               map_resolution_, map_origin_x_, map_origin_y_, map_height_);
 
-  // 解析航点
+  // --- 解析航点 ---
   if (yaml["waypoints"]) {
     for (const auto & wp_node : yaml["waypoints"]) {
       fleet_msgs::msg::Waypoint waypoint;
       waypoint.waypoint_id = wp_node["id"].as<std::string>();
       waypoint.name = wp_node["name"].as<std::string>("");
 
+      // 像素坐标 -> 世界坐标转换
       double pixel_x = wp_node["position"]["x"].as<double>();
       double pixel_y = wp_node["position"]["y"].as<double>();
 
@@ -291,6 +301,7 @@ void TrafficManager::load_from_yaml(const YAML::Node & yaml)
                    waypoint.waypoint_id.c_str(), pixel_x, pixel_y,
                    waypoint.pose.position.x, waypoint.pose.position.y, map_height_);
 
+      // 连接关系
       if (wp_node["connections"]) {
         for (const auto & conn : wp_node["connections"]) {
           waypoint.connections.push_back(conn.as<std::string>());
@@ -305,6 +316,7 @@ void TrafficManager::load_from_yaml(const YAML::Node & yaml)
     }
   }
 
+  // --- 地图元信息 ---
   if (yaml["map_id"]) {
     current_map_.map_id = yaml["map_id"].as<std::string>();
   }
@@ -320,6 +332,7 @@ YAML::Node TrafficManager::save_to_yaml()
 {
   YAML::Node yaml;
 
+  // 地图元信息
   yaml["map_id"] = current_map_.map_id;
   yaml["map_name"] = current_map_.map_name;
   yaml["map_yaml_path"] = current_map_.map_yaml_path;
@@ -333,6 +346,7 @@ YAML::Node TrafficManager::save_to_yaml()
   }
   yaml["waypoints"] = YAML::Node(YAML::NodeType::Sequence);
 
+  // 导出航点（世界坐标 -> 像素坐标逆变换）
   for (const auto & waypoint : current_map_.waypoints) {
     YAML::Node wp_node;
     wp_node["id"] = waypoint.waypoint_id;

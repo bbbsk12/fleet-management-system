@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """
 调度规则违规监控脚本 (Scheduling Rule Violation Watchdog) v2
+=============================================================
 
-持续监控 fleet_manager 的机器人状态，检测以下违规：
-  【毁灭性】规则①  同一航点上出现两台机器人                  → 零容忍，立即触发
-  【毁灭性】规则②  同一航道（无论方向）上出现两台机器人      → 零容忍，立即触发
-  【毁灭性】规则③  机器人在航点，另一台在该航点关联的航段上  → 零容忍，立即触发
-  【严重】  规则④  两台机器人物理距离过近（安全距离违规）    → 防抖后触发
-  【毁灭性】规则⑤  存在挂起任务且 15 秒无任何底盘活动        → 立即触发
-  【毁灭性】规则⑥  两台机器人在共享同一航点的不同航段上      → 零容忍，立即触发
+功能说明：
+  持续监控 fleet_manager 的机器人状态，检测以下违规行为：
 
-航点/航道冲突、调度挂起被定义为「毁灭性故障」：第一次检测到即触发，无需防抖。
+    【毁灭性】规则①  同一航点上出现两台机器人                    → 零容忍，立即触发
+    【毁灭性】规则②  同一航道（无论方向）上出现两台机器人        → 零容忍，立即触发
+    【毁灭性】规则③  机器人在航点，另一台在该航点关联的航段上    → 零容忍，立即触发
+    【严重】  规则④  两台机器人物理距离过近（安全距离违规）      → 防抖后触发
+    【毁灭性】规则⑤  存在挂起任务且 15 秒无任何底盘活动          → 立即触发
+    【毁灭性】规则⑥  两台机器人在共享同一航点的不同航段上        → 零容忍，立即触发
+
+严重级别说明：
+  - 航点/航道冲突、相邻航段冲突、调度挂起被定义为"毁灭性故障"：第一次检测到即触发，无需防抖。
+  - 物理距离过近为"严重"违规：需连续检测到指定次数后才触发。
 """
 
 import argparse
@@ -31,7 +36,8 @@ if str(SCRIPTS_ROOT) not in sys.path:
 from _lib.http_api import http_json
 from _lib.traffic_rules import parse_segment
 
-# ─── 地图拓扑（硬编码，与 rmf_map0.yaml 一致） ─────────────────────────
+# ---- 地图拓扑（硬编码，与 rmf_map0.yaml 一致） ----
+
 EDGES = [
     ("wp_001", "wp_006"), ("wp_001", "wp_007"),
     ("wp_002", "wp_005"), ("wp_002", "wp_003"), ("wp_002", "wp_007"),
@@ -51,31 +57,34 @@ for a, b in EDGES:
     VALID_SEGMENTS.add((a, b))
     VALID_SEGMENTS.add((b, a))
 
-# ─── 参数 ─────────────────────────────────────────────────────────────
+# ---- 运行参数 ----
+
 BASE_URL = os.environ.get("FLEET_API_BASE", "http://127.0.0.1:8080")
 SAFE_DISTANCE_M = 0.6           # 物理安全距离（米）
-POLL_INTERVAL_S = 0.3           # 轮询间隔（实时监测要更短）
-VIOLATION_GRACE_TICKS = 2       # 普通违规连续 N 次检测到才触发（防抖）
-STALL_TIMEOUT_S = 15.0          # 挂起任务下，全局无活动超时
-ACTIVITY_POS_EPS_M = 0.03       # 认为发生了位置活动的最小位移
-ACTIVITY_YAW_EPS_RAD = 0.10     # 认为发生了原地转动的最小角度
-ACTIVITY_ROUTE_PREVIEW_LEN = 4  # 活动判定只看前几个规划点，避免日志/比较过大
-STALL_WARN_IDLE_S = 2.0         # 挂起监视开始提示前，至少连续静止这么久
+POLL_INTERVAL_S = 0.3           # 轮询间隔（秒）
+VIOLATION_GRACE_TICKS = 2       # 普通违规连续检测次数阈值（防抖）
+STALL_TIMEOUT_S = 15.0          # 挂起任务下全局无活动超时（秒）
+ACTIVITY_POS_EPS_M = 0.03       # 判定位置发生变化的最小位移（米）
+ACTIVITY_YAW_EPS_RAD = 0.10     # 判定发生原地转动的最小角度（弧度）
+ACTIVITY_ROUTE_PREVIEW_LEN = 4  # 活动判定时参考的规划点数量
+STALL_WARN_IDLE_S = 2.0         # 挂起监视开始提示前的连续静止时间（秒）
 
 TERMINAL_TASK_STATUSES = {"completed", "cancelled", "failed"}
 
-# 毁灭性故障（航点/航道冲突）的严重级别
-SEVERITY_CATASTROPHIC = "CATASTROPHIC"  # 零容忍，第1次就触发
-SEVERITY_SEVERE = "SEVERE"              # 防抖后触发
+# 严重级别定义
+SEVERITY_CATASTROPHIC = "CATASTROPHIC"  # 毁灭性故障：零容忍，第1次即触发
+SEVERITY_SEVERE = "SEVERE"              # 严重违规：需防抖后触发
 
-# ─── 全局状态 ──────────────────────────────────────────────────────────
+# ---- 全局状态 ----
+
 running = True
-violation_counts: dict[str, int] = {}   # violation_key → consecutive count
+violation_counts: dict[str, int] = {}   # 违规键 → 连续检测次数
 log_file = None
 cancelled = False
 
 
 def sig_handler(_sig, _frame):
+    """信号处理函数：设置运行标志为 False 以优雅退出。"""
     global running
     running = False
 
@@ -83,11 +92,14 @@ signal.signal(signal.SIGINT, sig_handler)
 signal.signal(signal.SIGTERM, sig_handler)
 
 
-# ─── 工具函数 ──────────────────────────────────────────────────────────
+# ---- 工具函数 ----
+
 def ts() -> str:
+    """返回当前时间的毫秒级时间戳字符串 (HH:MM:SS.mmm)。"""
     return datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
 def log(msg: str, level: str = "INFO"):
+    """输出带时间戳和级别的日志，同时写入日志文件（如已打开）。"""
     line = f"[{ts()}] [{level}] {msg}"
     print(line, flush=True)
     if log_file:
@@ -95,6 +107,7 @@ def log(msg: str, level: str = "INFO"):
         log_file.flush()
 
 def api_get(path: str):
+    """发送 GET 请求并返回响应，失败时记录警告并返回 None。"""
     try:
         return http_json(f"{BASE_URL}{path}", method="GET", timeout=3.0)
     except Exception as e:
@@ -102,6 +115,7 @@ def api_get(path: str):
         return None
 
 def api_delete(path: str):
+    """发送 DELETE 请求，失败时记录警告。"""
     try:
         return http_json(f"{BASE_URL}{path}", method="DELETE", timeout=3.0)
     except Exception as e:
@@ -109,6 +123,7 @@ def api_delete(path: str):
         return None
 
 def api_post(path: str, body: dict | None = None):
+    """发送 POST 请求，失败时记录警告。"""
     try:
         return http_json(f"{BASE_URL}{path}", method="POST", body=body, timeout=3.0)
     except Exception as e:
@@ -117,21 +132,22 @@ def api_post(path: str, body: dict | None = None):
 
 
 def is_non_terminal_task(task: dict) -> bool:
+    """判断任务是否尚未进入终态（未完成/未取消/未失败）。"""
     return task.get("status") not in TERMINAL_TASK_STATUSES
 
 
 def cancel_all_tasks():
-    """取消所有进行中的任务"""
+    """取消所有进行中的任务：执行紧急停止、逐个取消任务、召回机器人并核验。"""
     global cancelled
     if cancelled:
         return
     cancelled = True
 
-    # 方法1: 通过 emergency_stop
+    # 方法1：调用紧急停止接口
     log(">>> 执行紧急停止 + 取消全部任务 <<<", "ACTION")
     api_post("/api/emergency_stop")
 
-    # 方法2: 逐个取消所有非终态任务
+    # 方法2：逐个取消所有非终态任务
     tasks_resp = api_get("/api/tasks")
     if tasks_resp and "tasks" in tasks_resp:
         for t in tasks_resp["tasks"]:
@@ -140,14 +156,14 @@ def cancel_all_tasks():
                 api_delete(f"/api/tasks/{tid}")
                 log(f"  已取消任务 {tid} status={t.get('status','?')}", "ACTION")
 
-    # 方法3: 逐个 recall 机器人
+    # 方法3：逐个召回机器人
     robots_resp = api_get("/api/robots")
     if robots_resp and "robots" in robots_resp:
         for rid in robots_resp["robots"]:
             api_post(f"/api/robots/{rid}/recall")
             log(f"  已召回 {rid}", "ACTION")
 
-    # 方法4: 核验是否仍有非终态任务残留
+    # 方法4：核验是否仍有非终态任务残留
     verify_resp = api_get("/api/tasks")
     if verify_resp and "tasks" in verify_resp:
         remaining = [
@@ -162,12 +178,14 @@ def cancel_all_tasks():
 
 
 def euclidean(pos_a: dict, pos_b: dict) -> float:
+    """计算两个位置之间的欧几里得距离（米）。"""
     dx = pos_a.get("world_x", 0) - pos_b.get("world_x", 0)
     dy = pos_a.get("world_y", 0) - pos_b.get("world_y", 0)
     return math.sqrt(dx * dx + dy * dy)
 
 
 def normalize_angle_rad(angle: float) -> float:
+    """将角度归一化到 [-pi, pi) 区间。"""
     while angle > math.pi:
         angle -= 2.0 * math.pi
     while angle < -math.pi:
@@ -176,6 +194,7 @@ def normalize_angle_rad(angle: float) -> float:
 
 
 def get_suspended_tasks(tasks_resp: dict | None) -> list[dict]:
+    """从任务响应中提取所有挂起的非终态任务（排除 pending 状态）。"""
     if not tasks_resp or "tasks" not in tasks_resp:
         return []
     suspended = []
@@ -190,6 +209,7 @@ def get_suspended_tasks(tasks_resp: dict | None) -> list[dict]:
 
 
 def robot_activity_snapshot(robot: dict) -> dict:
+    """提取机器人当前的关键活动状态快照，用于活动检测。"""
     pos = robot.get("position", {})
     return {
         "status": robot.get("status", ""),
@@ -211,6 +231,14 @@ def detect_robot_activity(
     pos_eps: float = ACTIVITY_POS_EPS_M,
     yaw_eps: float = ACTIVITY_YAW_EPS_RAD,
 ) -> tuple[dict, list[str]]:
+    """
+    检测各机器人是否有活动发生。
+
+    判断标准包括：位置移动、姿态转动、位置类型变化、导航状态变化、
+    整体状态变化、当前任务变化、规划路径变化。
+
+    返回值：(更新后的快照字典, 活动原因列表)
+    """
     next_activity_anchors = {}
     reasons: list[str] = []
 
@@ -274,19 +302,24 @@ def detect_robot_activity(
     return next_activity_anchors, reasons
 
 
-# ─── 违规检测 ──────────────────────────────────────────────────────────
+# ---- 违规检测逻辑 ----
+
 def check_violations(robots: dict, safe_distance: float = SAFE_DISTANCE_M) -> list[dict]:
     """
-    返回违规列表，每项:
-    {
-      "rule": str,
-      "severity": "CATASTROPHIC" | "SEVERE",
-      "key": 去重键,
-      "robots": [id1, id2],
-      "detail": 描述
-    }
-    航点/航道冲突 = CATASTROPHIC（零容忍）
-    物理距离过近 = SEVERE（需防抖）
+    对当前所有在线机器人执行六类规则检查。
+
+    返回格式：
+      [{
+        "rule": str,        # 规则标识
+        "severity": str,    # CATASTROPHIC | SEVERE
+        "key": str,         # 去重键
+        "robots": [id1, id2],
+        "detail": str       # 中文描述
+      }, ...]
+
+    规则说明：
+      规则①-③、⑤-⑥ 为 CATASTROPHIC（毁灭性故障），零容忍。
+      规则④ 为 SEVERE（严重违规），需防抖。
     """
     violations = []
     ids = [rid for rid, r in robots.items() if r.get("online")]
@@ -308,7 +341,7 @@ def check_violations(robots: dict, safe_distance: float = SAFE_DISTANCE_M) -> li
             ra_seg = (ra_u, ra_v) if ra_u and ra_v else None
             rb_seg = (rb_u, rb_v) if rb_u and rb_v else None
 
-            # ── 【毁灭性】规则① 同航点 ──
+            # ---- 【毁灭性】规则①：同航点 ----
             if ra_loc == "waypoint" and rb_loc == "waypoint" and ra_wp and ra_wp == rb_wp:
                 violations.append({
                     "rule": "R1_SAME_WP",
@@ -318,9 +351,8 @@ def check_violations(robots: dict, safe_distance: float = SAFE_DISTANCE_M) -> li
                     "detail": f"【毁灭性】{ra_id} 和 {rb_id} 同时在航点 {ra_wp}"
                 })
 
-            # ── 【毁灭性】规则② 同航道（无论方向） ──
+            # ---- 【毁灭性】规则②：同航道（无论方向） ----
             if ra_loc == "segment" and rb_loc == "segment" and ra_seg and rb_seg:
-                # 归一化为同一条边：两方向都算同一航道
                 edge_a = tuple(sorted([ra_seg[0], ra_seg[1]]))
                 edge_b = tuple(sorted([rb_seg[0], rb_seg[1]]))
                 if edge_a == edge_b:
@@ -329,10 +361,11 @@ def check_violations(robots: dict, safe_distance: float = SAFE_DISTANCE_M) -> li
                         "severity": SEVERITY_CATASTROPHIC,
                         "key": f"R2_EDGE_{edge_a[0]}_{edge_a[1]}",
                         "robots": [ra_id, rb_id],
-                        "detail": f"【毁灭性】{ra_id}({ra_seg_str}) 和 {rb_id}({rb_seg_str}) 在同一航道 {edge_a[0]}↔{edge_a[1]}"
+                        "detail": f"【毁灭性】{ra_id}({ra_seg_str}) 和 {rb_id}({rb_seg_str}) "
+                                  f"在同一航道 {edge_a[0]}↔{edge_a[1]}"
                     })
 
-            # ── 【毁灭性】规则③ 航点+关联航段冲突 ──
+            # ---- 【毁灭性】规则③：航点 + 关联航段冲突 ----
             # A 在航点 X，B 在经过 X 的航段上（X→Y 或 Y→X）
             if ra_loc == "waypoint" and rb_loc == "segment" and ra_wp and rb_seg:
                 if ra_wp in rb_seg:
@@ -341,7 +374,8 @@ def check_violations(robots: dict, safe_distance: float = SAFE_DISTANCE_M) -> li
                         "severity": SEVERITY_CATASTROPHIC,
                         "key": f"R3_{ra_wp}_{rb_seg_str}",
                         "robots": [ra_id, rb_id],
-                        "detail": f"【毁灭性】{ra_id} 在航点 {ra_wp}，{rb_id} 在关联航段 {rb_seg_str}"
+                        "detail": f"【毁灭性】{ra_id} 在航点 {ra_wp}，"
+                                  f"{rb_id} 在关联航段 {rb_seg_str}"
                     })
             if rb_loc == "waypoint" and ra_loc == "segment" and rb_wp and ra_seg:
                 if rb_wp in ra_seg:
@@ -350,15 +384,16 @@ def check_violations(robots: dict, safe_distance: float = SAFE_DISTANCE_M) -> li
                         "severity": SEVERITY_CATASTROPHIC,
                         "key": f"R3_{rb_wp}_{ra_seg_str}",
                         "robots": [rb_id, ra_id],
-                        "detail": f"【毁灭性】{rb_id} 在航点 {rb_wp}，{ra_id} 在关联航段 {ra_seg_str}"
+                        "detail": f"【毁灭性】{rb_id} 在航点 {rb_wp}，"
+                                  f"{ra_id} 在关联航段 {ra_seg_str}"
                     })
 
-            # ── 【严重】规则④ 物理距离过近 ──
+            # ---- 【严重】规则④：物理距离过近 ----
             pos_a = ra.get("position", {})
             pos_b = rb.get("position", {})
             if pos_a.get("world_x") is not None and pos_b.get("world_x") is not None:
                 dist = euclidean(pos_a, pos_b)
-                # 只在双方都在移动或有active goal时检查距离
+                # 仅当双方都有任务（移动中或待执行）时检查距离
                 both_have_task = (ra.get("current_task") or rb.get("current_task"))
                 if dist < safe_distance and both_have_task:
                     violations.append({
@@ -366,15 +401,16 @@ def check_violations(robots: dict, safe_distance: float = SAFE_DISTANCE_M) -> li
                         "severity": SEVERITY_SEVERE,
                         "key": "R4_DIST",
                         "robots": [ra_id, rb_id],
-                        "detail": f"【严重】{ra_id} 和 {rb_id} 距离仅 {dist:.2f}m（阈值 {safe_distance}m）"
+                        "detail": f"【严重】{ra_id} 和 {rb_id} 距离仅 {dist:.2f}m"
+                                  f"（阈值 {safe_distance}m）"
                     })
 
-            # ── 【毁灭性】规则⑥ 相邻航段冲突（共享航点的不同航段上出现多台机器人） ──
+            # ---- 【毁灭性】规则⑥：相邻航段冲突（共享航点的不同航段上出现多台机器人） ----
             if ra_loc == "segment" and rb_loc == "segment" and ra_seg and rb_seg:
                 edge_a = tuple(sorted([ra_seg[0], ra_seg[1]]))
                 edge_b = tuple(sorted([rb_seg[0], rb_seg[1]]))
-                if edge_a != edge_b:  # 不同航段（同航段已由 R2 处理）
-                    # 检查是否共享一个端点
+                if edge_a != edge_b:
+                    # 检查是否共享一个端点（航点）
                     shared = set(edge_a) & set(edge_b)
                     if shared:
                         shared_wp = next(iter(shared))
@@ -392,8 +428,10 @@ def check_violations(robots: dict, safe_distance: float = SAFE_DISTANCE_M) -> li
     return violations
 
 
-# ─── 状态快照打印 ─────────────────────────────────────────────────────
+# ---- 状态快照打印 ----
+
 def snapshot(robots: dict, tasks_resp: dict | None):
+    """打印当前所有在线机器人的详细状态快照及活跃任务列表。"""
     lines = []
     for rid, r in sorted(robots.items()):
         if not r.get("online"):
@@ -412,12 +450,15 @@ def snapshot(robots: dict, tasks_resp: dict | None):
         lines.append(f"  {rid}: loc={loc_str} nav={nav} task={task or '-'} "
                       f"route=[{route_str}] pos=({wx:.2f},{wy:.2f})")
 
-    # 活跃任务
+    # 活跃任务列表
     active_tasks = []
     if tasks_resp and "tasks" in tasks_resp:
         for t in tasks_resp["tasks"]:
             if is_non_terminal_task(t):
-                active_tasks.append(f"{t['id'][-8:]}→{t.get('waypoint_id','?')}({t.get('robot_id','?')},{t.get('status')})")
+                active_tasks.append(
+                    f"{t['id'][-8:]}→{t.get('waypoint_id','?')}"
+                    f"({t.get('robot_id','?')},{t.get('status')})"
+                )
 
     log("─── 快照 ───")
     for l in lines:
@@ -428,20 +469,30 @@ def snapshot(robots: dict, tasks_resp: dict | None):
         log("  活跃任务: 无")
 
 
-# ─── 主循环 ────────────────────────────────────────────────────────────
+# ---- 主循环 ----
+
 def main():
+    """主函数：解析参数、初始化日志、启动持续监控和违规检测循环。"""
     global log_file, cancelled, BASE_URL
 
     parser = argparse.ArgumentParser(description="调度规则违规监控")
-    parser.add_argument("--duration", type=int, default=300, help="监控持续秒数（默认300）")
-    parser.add_argument("--interval", type=float, default=0.3, help="轮询间隔秒（默认0.3，实时监测）")
-    parser.add_argument("--grace", type=int, default=2, help="连续违规检测次数才触发取消")
-    parser.add_argument("--snapshot-interval", type=int, default=10, help="快照打印间隔（秒）")
+    parser.add_argument("--duration", type=int, default=300,
+                        help="监控持续秒数（默认300）")
+    parser.add_argument("--interval", type=float, default=0.3,
+                        help="轮询间隔秒（默认0.3，实时监测）")
+    parser.add_argument("--grace", type=int, default=2,
+                        help="连续违规检测次数才触发取消")
+    parser.add_argument("--snapshot-interval", type=int, default=10,
+                        help="快照打印间隔（秒）")
     parser.add_argument("--log-dir", default="test_logs", help="日志目录")
-    parser.add_argument("--no-cancel", action="store_true", help="仅报警不取消任务")
-    parser.add_argument("--safe-distance", type=float, default=0.6, help="安全距离（米）")
-    parser.add_argument("--stall-timeout", type=float, default=15.0, help="存在挂起任务时，全局无活动超时秒数")
-    parser.add_argument("--base", type=str, default=BASE_URL, help="Web backend URL (or env FLEET_API_BASE)")
+    parser.add_argument("--no-cancel", action="store_true",
+                        help="仅报警不取消任务")
+    parser.add_argument("--safe-distance", type=float, default=0.6,
+                        help="安全距离（米）")
+    parser.add_argument("--stall-timeout", type=float, default=15.0,
+                        help="存在挂起任务时，全局无活动超时秒数")
+    parser.add_argument("--base", type=str, default=BASE_URL,
+                        help="Web backend URL (or env FLEET_API_BASE)")
     args = parser.parse_args()
     BASE_URL = args.base.rstrip("/")
 
@@ -450,7 +501,7 @@ def main():
     grace_ticks = args.grace
     stall_timeout = args.stall_timeout
 
-    # 创建日志
+    # 创建日志文件
     os.makedirs(args.log_dir, exist_ok=True)
     now_dt = datetime.datetime.now()
     log_name = (
@@ -461,10 +512,12 @@ def main():
     log_file = open(log_path, "w")
 
     log("=" * 60)
-    log(f"调度规则违规监控 v2 启动  duration={args.duration}s  interval={args.interval}s  grace={args.grace}")
+    log(f"调度规则违规监控 v2 启动  duration={args.duration}s  "
+        f"interval={args.interval}s  grace={args.grace}")
     log(f"安全距离={safe_distance}m  取消模式={'禁用' if args.no_cancel else '启用'}")
-    log(f"航点/航道冲突、相邻航段冲突、调度挂起 = 毁灭性故障（零容忍，第1次即触发）")
-    log(f"挂起阈值={stall_timeout:.1f}s（存在 assigned/in_progress/waiting_fleet 等任务且全局无活动）")
+    log("航点/航道冲突、相邻航段冲突、调度挂起 = 毁灭性故障（零容忍，第1次即触发）")
+    log(f"挂起阈值={stall_timeout:.1f}s"
+        f"（存在 assigned/in_progress/waiting_fleet 等任务且全局无活动）")
     log(f"日志: {log_path}")
     log("=" * 60)
 
@@ -481,7 +534,7 @@ def main():
     while running and (time.time() - start_time) < args.duration:
         tick += 1
 
-        # 获取状态
+        # 获取机器人状态
         robots_resp = api_get("/api/robots")
         if not robots_resp or "robots" not in robots_resp:
             time.sleep(poll_interval)
@@ -495,7 +548,7 @@ def main():
             activity_anchor_snapshots,
         )
 
-        # 实时位置输出（每2秒一次，确保能追踪位置变化）
+        # 实时位置输出（每 2 秒一次，确保能追踪位置变化）
         now = time.time()
         if now - last_realtime_log >= 2.0:
             parts = []
@@ -511,33 +564,36 @@ def main():
             log(f"[实时] {' | '.join(parts)}")
             last_realtime_log = now
 
-        # 定期快照（详细信息）
+        # 定期打印详细快照
         if now - last_snapshot >= args.snapshot_interval:
             snapshot(robots, tasks_resp)
             last_snapshot = now
 
-        # 违规检测
+        # 执行违规检测
         violations = check_violations(robots, safe_distance)
 
-        # 调度挂起检测：存在挂起任务，但所有机器人持续无活动
+        # ---- 调度挂起检测：存在挂起任务，但所有机器人持续无活动 ----
         if suspended_tasks:
             if last_activity_at is None:
                 last_activity_at = now
 
             if activity_reasons:
                 if stall_watch_warned:
-                    log(f"挂起监视复位: 检测到机器人活动 {'; '.join(activity_reasons[:3])}", "INFO")
+                    log(f"挂起监视复位: 检测到机器人活动 "
+                        f"{'; '.join(activity_reasons[:3])}", "INFO")
                 last_activity_at = now
                 stall_watch_warned = False
             else:
                 idle_for = now - last_activity_at
                 if idle_for >= STALL_WARN_IDLE_S and not stall_watch_warned:
                     preview = ", ".join(
-                        f"{t['id'][-8:]}({t.get('status','?')},{t.get('robot_id') or '-'}->{t.get('waypoint_id') or '-'})"
+                        f"{t['id'][-8:]}({t.get('status','?')},"
+                        f"{t.get('robot_id') or '-'}->{t.get('waypoint_id') or '-'})"
                         for t in suspended_tasks[:6]
                     )
                     log(
-                        f"挂起监视观察中: 存在挂起任务且已连续 {idle_for:.1f}s 无机器人活动 tasks={preview}",
+                        f"挂起监视观察中: 存在挂起任务且已连续 {idle_for:.1f}s "
+                        f"无机器人活动 tasks={preview}",
                         "WARN",
                     )
                     stall_watch_warned = True
@@ -547,22 +603,29 @@ def main():
                         t.get("robot_id") for t in suspended_tasks if t.get("robot_id")
                     })
                     if not involved_robots:
-                        involved_robots = sorted([rid for rid, r in robots.items() if r.get("online")])
+                        involved_robots = sorted(
+                            [rid for rid, r in robots.items() if r.get("online")]
+                        )
                     violations.append({
                         "rule": "R5_SCHEDULER_STALL",
                         "severity": SEVERITY_CATASTROPHIC,
                         "key": "R5_SCHEDULER_STALL",
                         "robots": involved_robots,
                         "detail": (
-                            f"【毁灭性】调度挂起：存在挂起任务且连续 {stall_timeout:.1f}s 无任何底盘活动；"
-                            f"tasks={', '.join(f'{t['id'][-8:]}:{t.get('status','?')}:{t.get('robot_id') or '-'}->{t.get('waypoint_id') or '-'}' for t in suspended_tasks[:6])}"
+                            f"【毁灭性】调度挂起：存在挂起任务且连续 {stall_timeout:.1f}s "
+                            f"无任何底盘活动；tasks="
+                            + ", ".join(
+                                f"{t['id'][-8:]}:{t.get('status','?')}:"
+                                f"{t.get('robot_id') or '-'}->{t.get('waypoint_id') or '-'}"
+                                for t in suspended_tasks[:6]
+                            )
                         )
                     })
         else:
             last_activity_at = None
             stall_watch_warned = False
 
-        # 去重 + 按严重级别处理
+        # ---- 违规去重 + 按严重级别处理 ----
         seen_keys = set()
         for v in violations:
             k = v["key"]
@@ -577,16 +640,20 @@ def main():
                 effective_grace = grace_ticks
 
             if violation_counts[k] == effective_grace:
-                # 触发！
+                # 触发违规响应
                 total_violations_triggered += 1
                 if severity == SEVERITY_CATASTROPHIC:
                     catastrophic_count += 1
                     log("", "")
-                    log("╔══════════════════════════════════════════════════════════╗", "CATASTROPHIC")
-                    log(f"║  毁灭性故障 #{catastrophic_count}: {v['detail']}", "CATASTROPHIC")
-                    log("╚══════════════════════════════════════════════════════════╝", "CATASTROPHIC")
+                    log("╔══════════════════════════════════════════════════════════╗",
+                        "CATASTROPHIC")
+                    log(f"║  毁灭性故障 #{catastrophic_count}: {v['detail']}",
+                        "CATASTROPHIC")
+                    log("╚══════════════════════════════════════════════════════════╝",
+                        "CATASTROPHIC")
                 else:
-                    log(f"!!! 违规触发 #{total_violations_triggered}: [{v['rule']}] {v['detail']}", "VIOLATION")
+                    log(f"!!! 违规触发 #{total_violations_triggered}: "
+                        f"[{v['rule']}] {v['detail']}", "VIOLATION")
 
                 log(f"    涉及机器人: {v['robots']}", "VIOLATION")
 
@@ -594,11 +661,12 @@ def main():
                 tasks_resp = api_get("/api/tasks")
                 snapshot(robots, tasks_resp)
 
-                # 记录每个机器人的详细位置
+                # 记录每个涉及机器人的详细位置信息
                 for rid in v["robots"]:
                     r = robots.get(rid, {})
                     pos = r.get("position", {})
-                    log(f"    {rid}: world=({pos.get('world_x',0):.3f}, {pos.get('world_y',0):.3f}) "
+                    log(f"    {rid}: "
+                        f"world=({pos.get('world_x',0):.3f}, {pos.get('world_y',0):.3f}) "
                         f"yaw={pos.get('yaw',0):.2f} "
                         f"loc_type={r.get('location_type','?')} "
                         f"wp={r.get('current_waypoint','')} "
@@ -610,16 +678,18 @@ def main():
                     cancel_all_tasks()
                     log("已取消全部任务，等待 5 秒后继续监控...", "ACTION")
                     time.sleep(5)
-                    cancelled = False  # 重置，允许后续再次取消
+                    cancelled = False
                     violation_counts.clear()
                     break
 
             elif violation_counts[k] > effective_grace:
-                # 毁灭性故障持续中 - 每次都记录
+                # 毁灭性故障持续中 —— 每次都记录
                 if severity == SEVERITY_CATASTROPHIC:
-                    log(f"  !!! 毁灭性故障持续: {v['detail']} (第{violation_counts[k]}次)", "CATASTROPHIC")
+                    log(f"  !!! 毁灭性故障持续: {v['detail']} "
+                        f"(第{violation_counts[k]}次)", "CATASTROPHIC")
                 elif violation_counts[k] % 10 == 0:
-                    log(f"  持续违规 [{v['rule']}] {v['detail']} (第{violation_counts[k]}次)", "WARN")
+                    log(f"  持续违规 [{v['rule']}] {v['detail']} "
+                        f"(第{violation_counts[k]}次)", "WARN")
 
         # 清除不再活跃的违规计数
         stale = [k for k in violation_counts if k not in seen_keys]
@@ -630,7 +700,7 @@ def main():
 
         time.sleep(poll_interval)
 
-    # 结束汇总
+    # ---- 结束汇总 ----
     elapsed = time.time() - start_time
     log("=" * 60)
     log(f"监控结束  运行 {elapsed:.0f}s  总轮次 {tick}")

@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+UI 样式表模块。
+
+定义交通图编辑器的全局 Qt 样式表（QSS），
+实现 Material Design 风格的亮色主题外观，
+涵盖全局样式、卡片、按钮、工具栏和状态栏等组件。
+"""
+
 MODERN_STYLE = """
 /* 全局样式 */
 QMainWindow {

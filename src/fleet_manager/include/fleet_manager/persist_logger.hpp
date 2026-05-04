@@ -12,11 +12,26 @@
 
 namespace fleet_manager
 {
-// Very small persistent logger for debugging multi-robot logic issues.
-// Writes a single-line structured record into `log_dir`.
+
+// ============================================================================
+// 持久化日志器 — PersistLogger
+// ============================================================================
+/// @brief 轻量级持久化日志工具，用于多机器人调度逻辑的现场调试。
+///
+/// 将单行结构化日志记录写入指定目录下的时间戳文件，支持
+/// 多级日志（INFO / WARN / ERROR）以及条件输出。线程安全。
 class PersistLogger
 {
 public:
+  // ==========================================================================
+  // 初始化
+  // ==========================================================================
+
+  /// @brief 初始化日志器，创建日志目录并打开输出文件。
+  /// @param enabled         是否启用日志
+  /// @param log_dir         日志目录（为空则使用默认值 "test_logs"）
+  /// @param file_prefix     日志文件名前缀，默认 "fleet_manager"
+  /// @param also_verbose_info 是否启用条件 INFO 输出（配合 log_info_if）
   static void init(
     bool enabled,
     const std::string & log_dir,
@@ -30,16 +45,15 @@ public:
       return;
     }
     log_dir_ = log_dir.empty() ? std::string("test_logs") : log_dir;
-    // Create folder if missing.
+    // 若目录不存在则自动创建
     std::error_code ec;
     std::filesystem::create_directories(log_dir_, ec);
 
-    // Use a timestamped file to avoid unbounded growth.
+    // 使用时间戳命名文件，避免无限制增长
     const auto now = std::chrono::system_clock::now();
     const std::time_t t = std::chrono::system_clock::to_time_t(now);
     std::tm tm{};
-    // Prefer local time to match operator expectation.
-    // (thread-safe variant if available; gmtime_r/localtime_r is common on Linux)
+    // 使用本地时间以匹配运维人员预期
     localtime_r(&t, &tm);
 
     std::ostringstream name;
@@ -57,6 +71,11 @@ public:
     ofs_.open(file_path_, std::ios::out | std::ios::app);
   }
 
+  // ==========================================================================
+  // 日志写入接口
+  // ==========================================================================
+
+  /// @brief 写入 WARN 级别日志。
   static void log_warn(
     const std::string & tag,
     const std::string & robot_id,
@@ -69,6 +88,7 @@ public:
     log_impl("WARN", tag, robot_id, task_id, message, src_file, src_line, src_func);
   }
 
+  /// @brief 写入 ERROR 级别日志。
   static void log_error(
     const std::string & tag,
     const std::string & robot_id,
@@ -81,6 +101,7 @@ public:
     log_impl("ERROR", tag, robot_id, task_id, message, src_file, src_line, src_func);
   }
 
+  /// @brief 写入 INFO 级别日志。
   static void log_info(
     const std::string & tag,
     const std::string & robot_id,
@@ -93,6 +114,7 @@ public:
     log_impl("INFO", tag, robot_id, task_id, message, src_file, src_line, src_func);
   }
 
+  /// @brief 根据开关条件写入 INFO 级别日志（需同时满足 enabled 和 verbose_info_ 为 true）。
   static void log_info_if(
     bool enabled,
     const std::string & tag,
@@ -110,6 +132,11 @@ public:
   }
 
 private:
+  // ==========================================================================
+  // 内部实现
+  // ==========================================================================
+
+  /// @brief 日志写入内部实现，统一格式化并输出到文件。
   static void log_impl(
     const std::string & level,
     const std::string & tag,
@@ -125,7 +152,7 @@ private:
       return;
     }
     if (!ofs_.is_open()) {
-      // Best-effort: if init() wasn't called, still create a default file.
+      // 兜底：若 init() 未被调用，仍然创建默认文件
       std::error_code ec;
       std::filesystem::create_directories("test_logs", ec);
       if (file_path_.empty()) {
@@ -168,4 +195,3 @@ private:
 };
 
 }  // namespace fleet_manager
-

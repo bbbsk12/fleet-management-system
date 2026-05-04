@@ -1,12 +1,14 @@
 <template>
   <div class="space-y-4 sm:space-y-6">
+    <!-- 页面头部：标题与操作按钮 -->
     <div class="flex items-center justify-between flex-wrap gap-2 sm:gap-4">
       <div>
         <h1 class="text-xl sm:text-2xl font-bold tracking-wide" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">{{ t('map.title') }}</h1>
         <p class="text-xs sm:text-sm mt-0.5" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-500'">{{ t('map.subtitle') }}</p>
       </div>
       <div class="flex gap-2">
-        <button 
+        <!-- 加载地图文件按钮 -->
+        <button
           class="px-3 py-2 rounded-lg border text-sm transition-colors flex items-center gap-2"
           :class="theme === 'dark' ? 'bg-industrial-700 border-industrial-600 text-gray-300 hover:bg-industrial-600' : 'bg-gray-100 border-gray-200 text-gray-600 hover:bg-gray-200'"
           @click="loadMapFile"
@@ -14,7 +16,8 @@
           <FolderOpen class="w-4 h-4" />
           {{ t('map.loadMap') }}
         </button>
-        <button 
+        <!-- 刷新位置按钮 -->
+        <button
           class="px-3 py-2 rounded-lg bg-cyber-blue/20 border border-cyber-blue/40 text-cyber-blue text-sm hover:bg-cyber-blue/30 transition-colors flex items-center gap-2"
           @click="refreshPositions"
         >
@@ -24,36 +27,38 @@
       </div>
     </div>
 
+    <!-- 地图 Canvas 容器 -->
     <div class="data-card rounded-xl p-0 neon-border overflow-hidden">
       <div class="relative h-[300px] sm:h-[400px] lg:h-[550px] cursor-grab active:cursor-grabbing" :class="theme === 'dark' ? 'bg-industrial-900' : 'bg-gray-100'" ref="mapWrapper">
-        <canvas 
-          ref="mapCanvas" 
+        <!-- 地图绘制 Canvas -->
+        <canvas
+          ref="mapCanvas"
           class="absolute inset-0 w-full h-full"
-          @click="handleMapClick" 
-          @wheel="handleWheel" 
-          @mousedown="startDrag" 
-          @mousemove="doDrag" 
+          @click="handleMapClick"
+          @wheel="handleWheel"
+          @mousedown="startDrag"
+          @mousemove="doDrag"
           @mouseup="endDrag"
           @touchstart.passive="onTouchStart"
           @touchmove.prevent="onTouchMove"
           @touchend="onTouchEnd"
         ></canvas>
-        
-        <!-- 锚点仅为圆点 32×32；标签绝对定位在下方，避免长文案撑宽容器导致 translate 中心偏移 -->
-        <div 
-          v-for="wp in waypoints" 
+
+        <!-- 航点标记：锚点仅为圆点 32x32；标签绝对定位在下方，避免长文案撑宽容器导致 translate 中心偏移 -->
+        <div
+          v-for="wp in waypoints"
           :key="wp.id"
           class="absolute z-10 overflow-visible"
           :style="getWaypointAnchorStyle(wp)"
         >
           <div class="relative h-8 w-8 cursor-pointer transition-transform hover:scale-125 origin-center" @click.stop="selectWaypoint(wp)">
-            <div 
+            <div
               class="h-8 w-8 rounded-full flex items-center justify-center shadow-lg"
               :class="getWaypointBgClass(wp)"
             >
               <component :is="getWaypointIcon(wp)" class="w-4 h-4 text-white" />
             </div>
-            <div 
+            <div
               class="absolute top-full left-1/2 z-20 mt-1 max-w-[min(12rem,40vw)] -translate-x-1/2 cursor-pointer truncate px-1.5 py-0.5 text-center text-xs font-medium rounded"
               :class="theme === 'dark' ? 'text-white bg-black/60' : 'text-gray-900 bg-white/80'"
               :title="wp.name || wp.id"
@@ -63,9 +68,10 @@
             </div>
           </div>
         </div>
-        
-        <div 
-          v-for="robot in robotMarkers" 
+
+        <!-- 机器人标记 -->
+        <div
+          v-for="robot in robotMarkers"
           :key="robot.id"
           class="absolute z-20 overflow-visible"
           :style="getRobotAnchorStyle(robot)"
@@ -74,6 +80,7 @@
             class="relative h-10 w-10 cursor-pointer transition-transform hover:scale-110 origin-center"
             @click.stop="selectRobot(robot)"
           >
+            <!-- 机器人朝向指示箭头 -->
             <div class="absolute inset-0 pointer-events-none" :style="getRobotHeadingStyle(robot)">
               <div class="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 scale-[2.6]">
                 <div class="relative h-5 w-5" :class="getRobotArrowGlowClass(robot)">
@@ -82,39 +89,40 @@
               </div>
             </div>
             <!-- offline 标记 -->
-            <div 
+            <div
               v-if="!robot.online || robot.status === 'offline'"
               class="absolute -top-1 -right-1 px-1 py-0.5 text-[8px] font-bold rounded bg-cyber-red text-white leading-none"
             >
               OFF
             </div>
-            <div 
+            <!-- 机器人信息标签 -->
+            <div
               class="absolute top-full left-1/2 z-20 mt-1 flex max-w-[min(12rem,42vw)] -translate-x-1/2 cursor-pointer flex-col items-center gap-0.5"
               @click.stop="selectRobot(robot)"
             >
-              <div 
+              <div
                 class="truncate px-2 py-0.5 text-center text-xs font-bold rounded w-full"
                 :class="theme === 'dark' ? 'text-white bg-black/70' : 'text-gray-900 bg-white/80'"
                 :title="robot.id"
               >
                 {{ robot.id }}
               </div>
-              <div 
-                v-if="robot.location_type === 'waypoint' && robot.current_waypoint" 
+              <div
+                v-if="robot.location_type === 'waypoint' && robot.current_waypoint"
                 class="truncate px-1.5 py-0.5 text-center text-[10px] rounded w-full"
                 :class="theme === 'dark' ? 'text-cyber-green bg-cyber-green/20' : 'text-green-600 bg-green-100'"
                 :title="'@' + robot.current_waypoint"
               >
                 @{{ robot.current_waypoint }}
               </div>
-              <div 
-                v-else-if="robot.location_type === 'segment' && robot.current_segment" 
+              <div
+                v-else-if="robot.location_type === 'segment' && robot.current_segment"
                 class="truncate px-1.5 py-0.5 text-center text-[10px] rounded w-full"
                 :class="theme === 'dark' ? 'text-cyber-blue bg-cyber-blue/20' : 'text-blue-600 bg-blue-100'"
               >
                 → {{ robot.current_segment }} · {{ t('fleet.segmentMoving') }}
               </div>
-              <div 
+              <div
                 class="text-[10px] text-center whitespace-nowrap"
                 :class="getBatteryTextClass(robot.battery)"
               >
@@ -123,7 +131,8 @@
             </div>
           </div>
         </div>
-        
+
+        <!-- 图例区域 -->
         <div class="absolute bottom-4 left-4 rounded-lg p-3 border backdrop-blur-sm" :class="theme === 'dark' ? 'bg-industrial-800/90 border-industrial-600' : 'bg-white/90 border-gray-200'">
           <div class="text-xs mb-2 font-medium" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">{{ t('map.legend') }}</div>
           <div class="space-y-1.5">
@@ -149,7 +158,8 @@
             </div>
           </div>
         </div>
-        
+
+        <!-- 缩放控制按钮 -->
         <div class="absolute bottom-4 right-4 flex flex-col items-center gap-1 rounded-lg p-2 border backdrop-blur-sm" :class="theme === 'dark' ? 'bg-industrial-800/90 border-industrial-600' : 'bg-white/90 border-gray-200'">
           <button class="w-8 h-8 rounded flex items-center justify-center transition-colors" :class="theme === 'dark' ? 'bg-industrial-700 hover:bg-industrial-600 text-white' : 'bg-gray-100 hover:bg-gray-200 text-gray-600'" @click="zoomIn">
             <Plus class="w-4 h-4" />
@@ -161,8 +171,10 @@
         </div>
       </div>
     </div>
-    
+
+    <!-- 底部信息面板网格 -->
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <!-- 选中机器人的详情面板 -->
       <div v-if="selectedRobot" class="data-card rounded-xl p-4 sm:p-6 neon-border">
         <div class="flex items-center justify-between mb-4">
           <h3 class="text-lg font-bold flex items-center gap-2" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">
@@ -185,8 +197,8 @@
             <p class="text-xs mb-1" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'">{{ t('fleet.battery') }}</p>
             <div class="flex items-center gap-2">
               <div class="flex-1 h-2 rounded-full overflow-hidden" :class="theme === 'dark' ? 'bg-industrial-700' : 'bg-gray-200'">
-                <div 
-                  class="h-full rounded-full transition-all" 
+                <div
+                  class="h-full rounded-full transition-all"
                   :class="batteryBarClass(selectedRobot.battery)"
                   :style="{ width: selectedRobot.battery + '%' }"
                 ></div>
@@ -205,6 +217,7 @@
             <p class="text-sm" :class="theme === 'dark' ? 'text-gray-300' : 'text-gray-600'">{{ selectedRobot.current_task || t('common.none') }}</p>
           </div>
         </div>
+        <!-- 机器人操作按钮 -->
         <div class="flex flex-wrap gap-2 mt-4 pt-4 border-t" :class="theme === 'dark' ? 'border-industrial-700' : 'border-gray-200'">
           <button class="px-3 py-2 rounded-lg bg-cyber-blue/20 border border-cyber-blue/40 text-cyber-blue text-sm hover:bg-cyber-blue/30 transition-colors" @click="sendToWaypoint">
             {{ t('map.sendToWaypoint') }}
@@ -217,7 +230,8 @@
           </button>
         </div>
       </div>
-      
+
+      <!-- 选中航点的详情面板 -->
       <div v-else-if="selectedWaypoint" class="data-card rounded-xl p-4 sm:p-6 neon-border">
         <div class="flex items-center justify-between mb-4">
           <h3 class="text-lg font-bold flex items-center gap-2" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">
@@ -257,19 +271,20 @@
           </button>
         </div>
       </div>
-      
+
+      <!-- 机器人列表面板（默认显示） -->
       <div v-else class="data-card rounded-xl p-4 sm:p-6 neon-border">
         <h3 class="text-lg font-bold mb-4 flex items-center gap-2" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">
           <Bot class="w-5 h-5 text-cyber-blue" />
           {{ t('map.robotList') }}
         </h3>
         <div class="space-y-2 max-h-48 overflow-y-auto">
-          <div 
-            v-for="robot in robotList" 
+          <div
+            v-for="robot in robotList"
             :key="robot.id"
             class="p-3 rounded-lg border cursor-pointer transition-colors"
-            :class="selectedRobot?.id === robot.id 
-              ? 'border-cyber-blue bg-cyber-blue/10' 
+            :class="selectedRobot?.id === robot.id
+              ? 'border-cyber-blue bg-cyber-blue/10'
               : (theme === 'dark' ? 'border-industrial-600 hover:border-cyber-blue bg-industrial-700/30' : 'border-gray-200 hover:border-cyber-blue bg-gray-50')"
             @click="selectRobot(robot)"
           >
@@ -290,23 +305,24 @@
           </div>
         </div>
       </div>
-      
+
+      <!-- 航点列表面板 -->
       <div class="data-card rounded-xl p-4 sm:p-6 neon-border">
         <h3 class="text-lg font-bold mb-4 flex items-center gap-2" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">
           <MapPin class="w-5 h-5 text-cyber-purple" />
           {{ t('map.waypointList') }}
         </h3>
         <div class="space-y-2 max-h-48 overflow-y-auto">
-          <div 
-            v-for="wp in waypoints" 
+          <div
+            v-for="wp in waypoints"
             :key="wp.id"
             class="p-3 rounded-lg border cursor-pointer transition-colors flex items-center gap-3"
-            :class="selectedWaypoint?.id === wp.id 
-              ? 'border-cyber-purple bg-cyber-purple/10' 
+            :class="selectedWaypoint?.id === wp.id
+              ? 'border-cyber-purple bg-cyber-purple/10'
               : (theme === 'dark' ? 'border-industrial-600 hover:border-cyber-purple bg-industrial-700/30' : 'border-gray-200 hover:border-cyber-purple bg-gray-50')"
             @click="selectWaypoint(wp)"
           >
-            <div 
+            <div
               class="w-8 h-8 rounded-full flex items-center justify-center"
               :class="getWaypointBgClass(wp)"
             >
@@ -320,7 +336,8 @@
         </div>
       </div>
     </div>
-    
+
+    <!-- 创建任务弹窗 -->
     <div v-if="showTaskModal" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4" @click.self="showTaskModal = false">
       <div class="data-card rounded-xl p-6 neon-border w-full max-w-md animate-scale-in">
         <div class="flex items-center justify-between mb-6">
@@ -329,18 +346,20 @@
             <X class="w-5 h-5" />
           </button>
         </div>
-        
+
+        <!-- 目标航点信息 -->
         <p class="mb-4" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">
           {{ t('map.targetWaypoint') }}: <span class="text-cyber-purple font-medium">{{ selectedWaypoint?.name || selectedWaypoint?.id }}</span>
         </p>
-        
+
+        <!-- 可选机器人列表 -->
         <div class="space-y-2 max-h-64 overflow-y-auto mb-4">
-          <div 
-            v-for="robot in availableRobots" 
+          <div
+            v-for="robot in availableRobots"
             :key="robot.id"
             class="p-3 rounded-lg border cursor-pointer transition-all"
-            :class="taskRobot === robot.id 
-              ? 'border-cyber-blue bg-cyber-blue/10' 
+            :class="taskRobot === robot.id
+              ? 'border-cyber-blue bg-cyber-blue/10'
               : (theme === 'dark' ? 'border-industrial-600 bg-industrial-700/50 hover:border-industrial-500' : 'border-gray-200 bg-gray-50 hover:border-gray-300')"
             @click="taskRobot = robot.id"
           >
@@ -353,16 +372,17 @@
             </div>
           </div>
         </div>
-        
+
+        <!-- 任务类型选择 -->
         <div class="mb-4">
           <label class="block text-sm mb-2" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">{{ t('tasks.taskType') }}</label>
           <div class="grid grid-cols-2 gap-2">
-            <button 
-              v-for="tt in taskTypeOptions" 
+            <button
+              v-for="tt in taskTypeOptions"
               :key="tt.value"
               class="py-2 rounded-lg text-sm font-medium transition-all"
-              :class="taskType === tt.value 
-                ? 'bg-cyber-blue/20 border border-cyber-blue/40 text-cyber-blue' 
+              :class="taskType === tt.value
+                ? 'bg-cyber-blue/20 border border-cyber-blue/40 text-cyber-blue'
                 : (theme === 'dark' ? 'bg-industrial-700 border border-industrial-600 text-gray-400' : 'bg-gray-100 border border-gray-200 text-gray-500')"
               @click="taskType = tt.value; if (tt.value === 1) taskSiteCode = 0"
             >
@@ -370,10 +390,11 @@
             </button>
           </div>
         </div>
-        
+
+        <!-- 站点编码输入（巡航类型时隐藏） -->
         <div v-if="taskType !== 1" class="mb-4">
           <label class="block text-sm mb-2" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">{{ t('tasks.siteCode') }}</label>
-          <input 
+          <input
             v-model.number="taskSiteCode"
             type="number"
             min="0"
@@ -382,16 +403,17 @@
             :class="theme === 'dark' ? 'bg-industrial-700 border-industrial-600 text-white' : 'bg-white border-gray-200 text-gray-900'"
           />
         </div>
-        
+
+        <!-- 操作按钮 -->
         <div class="flex gap-3">
-          <button 
+          <button
             class="flex-1 px-4 py-2.5 rounded-lg border transition-colors"
             :class="theme === 'dark' ? 'bg-industrial-700 border-industrial-600 text-gray-300 hover:bg-industrial-600' : 'bg-gray-100 border-gray-200 text-gray-600 hover:bg-gray-200'"
             @click="showTaskModal = false"
           >
             {{ t('common.cancel') }}
           </button>
-          <button 
+          <button
             class="flex-1 px-4 py-2.5 rounded-lg bg-cyber-blue/20 border border-cyber-blue/40 text-cyber-blue hover:bg-cyber-blue/30 transition-colors font-medium"
             @click="confirmTask"
           >
@@ -409,7 +431,7 @@ import { storeToRefs } from 'pinia'
 import { useFleetStore } from '../stores/fleet'
 import { useSettingsStore } from '../stores/settings'
 import axios from 'axios'
-import { 
+import {
   Bot, MapPin, Battery, X, FolderOpen, RotateCcw, Plus, Minus,
   Zap, Car
 } from 'lucide-vue-next'
@@ -419,6 +441,7 @@ const settingsStore = useSettingsStore()
 const { language, theme } = storeToRefs(settingsStore)
 const { t } = settingsStore
 
+// DOM 引用与响应式状态
 const mapCanvas = ref(null)
 const mapWrapper = ref(null)
 const selectedRobot = ref(null)
@@ -428,6 +451,7 @@ const taskRobot = ref('')
 const taskType = ref(1)
 const taskSiteCode = ref(0)
 
+// 地图变换参数
 const scale = ref(0.8)
 const offset = ref({ x: 50, y: 50 })
 const isDragging = ref(false)
@@ -435,25 +459,30 @@ const dragStart = ref({ x: 0, y: 0 })
 const lastTouchDist = ref(0)
 const lastTouchCenter = ref({ x: 0, y: 0 })
 
+// 地图图片加载状态
 const mapImage = ref(null)
 const mapLoading = ref(false)
 
 const waypoints = computed(() => fleetStore.waypoints || [])
 const mapData = computed(() => fleetStore.mapData)
 
+// 机器人列表（由 store 中对象转为数组）
 const robotList = computed(() => {
   return Object.entries(fleetStore.robots).map(([id, data]) => ({ id, ...data }))
 })
 
+// 地图上显示的机器人标记（筛选有位置的机器人，包括 offline 使用最后已知位姿）
 const robotMarkers = computed(() => {
   // 显示所有有位姿的机器人（包括 offline，用最后已知位姿）
   return robotList.value.filter(r => r.position)
 })
 
+// 可用于派遣任务的机器人（在线且空闲）
 const availableRobots = computed(() => {
   return robotList.value.filter(r => r.online && (r.status === 'idle' || r.status === 'arrived' || r.status === 'unknown'))
 })
 
+// 任务类型选项
 const taskTypeOptions = computed(() => [
   { value: 1, label: t('tasks.taskTypeCRUISE') },
   { value: 2, label: t('tasks.taskTypeLOAD') },
@@ -461,7 +490,7 @@ const taskTypeOptions = computed(() => [
   { value: 4, label: t('tasks.taskTypeSITE_SPECIFIC') }
 ])
 
-/** 地图坐标锚在圆心：固定 32×32，translate 只针对圆点，标签另 absolute 不参与尺寸 */
+/** 地图坐标锚在圆心：固定 32x32，translate 只针对圆点，标签另 absolute 不参与尺寸 */
 function getWaypointAnchorStyle(wp) {
   const x = wp.x * scale.value + offset.value.x
   const y = wp.y * scale.value + offset.value.y
@@ -474,7 +503,7 @@ function getWaypointAnchorStyle(wp) {
   }
 }
 
-/** 同上，机器人圆 40×40 (w-10) */
+/** 同上，机器人圆 40x40 (w-10) */
 function getRobotAnchorStyle(robot) {
   if (!robot.position) return { display: 'none' }
   const x = robot.position.x * scale.value + offset.value.x
@@ -488,30 +517,35 @@ function getRobotAnchorStyle(robot) {
   }
 }
 
+/** 根据航点类型返回对应图标组件 */
 function getWaypointIcon(wp) {
   if (wp.is_charging_station) return Zap
   if (wp.is_parking_spot) return Car
   return MapPin
 }
 
+/** 根据航点类型返回背景样式类 */
 function getWaypointBgClass(wp) {
   if (wp.is_charging_station) return 'bg-cyber-green shadow-lg shadow-cyber-green/50'
   if (wp.is_parking_spot) return 'bg-cyber-orange shadow-lg shadow-cyber-orange/50'
   return 'bg-cyber-purple shadow-lg shadow-cyber-purple/50'
 }
 
+/** 获取航点类型名称 */
 function getWaypointTypeName(wp) {
   if (wp.is_charging_station) return t('map.chargingStation')
   if (wp.is_parking_spot) return t('map.parkingSpot')
   return t('map.normalWaypoint')
 }
 
+/** 获取航点类型样式类 */
 function waypointTypeClass(wp) {
   if (wp.is_charging_station) return 'bg-cyber-green/20 text-cyber-green'
   if (wp.is_parking_spot) return 'bg-cyber-orange/20 text-cyber-orange'
   return 'bg-cyber-purple/20 text-cyber-purple'
 }
 
+/** 获取机器人朝向旋转样式 */
 function getRobotHeadingStyle(robot) {
   const deg = getRobotHeadingDeg(robot)
   return {
@@ -520,6 +554,7 @@ function getRobotHeadingStyle(robot) {
   }
 }
 
+/** 获取机器人朝向箭头颜色 */
 function getRobotArrowClass(robot) {
   if (robot.status === 'offline' || !robot.online) return 'border-b-slate-300'
   if (robot.status === 'moving' || robot.status === 'working') return 'border-b-cyan-300'
@@ -528,6 +563,7 @@ function getRobotArrowClass(robot) {
   return 'border-b-violet-300'
 }
 
+/** 获取机器人朝向箭头发光效果 */
 function getRobotArrowGlowClass(robot) {
   if (robot.status === 'offline' || !robot.online) return 'drop-shadow-[0_0_6px_rgba(203,213,225,0.85)]'
   if (robot.status === 'moving' || robot.status === 'working') return 'drop-shadow-[0_0_8px_rgba(103,232,249,0.9)]'
@@ -536,6 +572,7 @@ function getRobotArrowGlowClass(robot) {
   return 'drop-shadow-[0_0_8px_rgba(196,181,253,0.9)]'
 }
 
+/** 计算机器人朝向角度（度），优先级：TF 偏航角 > 当前路段方向 > 规划路径方向 */
 function getRobotHeadingDeg(robot) {
   // Preferred source: TF pose quaternion projected to yaw (already provided by backend as position.yaw).
   const yaw = robot?.position?.yaw
@@ -579,6 +616,7 @@ function getRobotHeadingDeg(robot) {
   return 0
 }
 
+// 电量相关样式辅助函数
 function getBatteryIconClass(battery) {
   if (battery > 60) return 'text-cyber-green'
   if (battery > 20) return 'text-cyber-orange'
@@ -597,19 +635,21 @@ function batteryBarClass(battery) {
   return 'bg-cyber-red'
 }
 
+/** 机器人状态文本映射 */
 function statusText(status) {
-  const map = { 
-    online: t('common.online'), 
-    offline: t('common.offline'), 
-    idle: t('common.idle'), 
-    moving: t('common.moving'), 
-    arrived: t('common.arrived'), 
-    failed: t('tasks.failed'), 
-    unknown: t('common.unknown') 
+  const map = {
+    online: t('common.online'),
+    offline: t('common.offline'),
+    idle: t('common.idle'),
+    moving: t('common.moving'),
+    arrived: t('common.arrived'),
+    failed: t('tasks.failed'),
+    unknown: t('common.unknown')
   }
   return map[status] || status
 }
 
+/** 机器人状态样式类 */
 function robotStatusClass(status) {
   const classes = {
     online: 'bg-cyber-green/20 text-cyber-green',
@@ -623,6 +663,7 @@ function robotStatusClass(status) {
   return classes[status] || 'bg-gray-500/20 text-gray-400'
 }
 
+/** 机器人状态圆点样式类 */
 function robotStatusDotClass(status) {
   const classes = {
     online: 'bg-cyber-green',
@@ -636,6 +677,7 @@ function robotStatusDotClass(status) {
   return classes[status] || 'bg-gray-500'
 }
 
+// 选中标记实体
 function selectRobot(robot) {
   selectedRobot.value = robot
   selectedWaypoint.value = null
@@ -646,6 +688,7 @@ function selectWaypoint(wp) {
   selectedRobot.value = null
 }
 
+// 缩放控制
 function zoomIn() {
   scale.value = Math.min(2, scale.value + 0.1)
   drawMap()
@@ -656,6 +699,7 @@ function zoomOut() {
   drawMap()
 }
 
+// 鼠标滚轮缩放
 function handleWheel(event) {
   event.preventDefault()
   const delta = event.deltaY > 0 ? -0.1 : 0.1
@@ -663,6 +707,7 @@ function handleWheel(event) {
   drawMap()
 }
 
+// 鼠标拖拽平移
 function startDrag(event) {
   isDragging.value = true
   dragStart.value = { x: event.clientX - offset.value.x, y: event.clientY - offset.value.y }
@@ -678,6 +723,7 @@ function endDrag() {
   isDragging.value = false
 }
 
+// 触屏交互：单指拖拽、双指缩放/平移
 function onTouchStart(event) {
   if (event.touches.length === 1) {
     isDragging.value = true
@@ -727,6 +773,7 @@ function onTouchEnd(event) {
   }
 }
 
+// 触屏辅助函数
 function getTouchDist(touches) {
   const dx = touches[0].clientX - touches[1].clientX
   const dy = touches[0].clientY - touches[1].clientY
@@ -740,63 +787,66 @@ function getTouchCenter(touches) {
   }
 }
 
+/** 点击地图空白区域取消选中 */
 function handleMapClick(event) {
   selectedRobot.value = null
   selectedWaypoint.value = null
 }
 
+/** 绘制地图主流程 */
 function drawMap() {
   const canvas = mapCanvas.value
   if (!canvas) return
-  
+
   const wrapper = mapWrapper.value
   canvas.width = wrapper.clientWidth
   canvas.height = wrapper.clientHeight
-  
+
   const ctx = canvas.getContext('2d')
-  
+
   ctx.fillStyle = theme === 'dark' ? '#0d1117' : '#f3f4f6'
   ctx.fillRect(0, 0, canvas.width, canvas.height)
-  
+
   ctx.save()
   ctx.translate(offset.value.x, offset.value.y)
   ctx.scale(scale.value, scale.value)
-  
+
   if (mapImage.value) {
     ctx.drawImage(mapImage.value, 0, 0)
   }
-  
+
   drawRoutes(ctx)
   drawRobotRoutes(ctx)
-  
+
   ctx.restore()
 }
 
+/** 绘制航点之间的连接路径 */
 function drawRoutes(ctx) {
   const wps = waypoints.value
   if (!wps || wps.length === 0) return
-  
+
   const wpMap = {}
   wps.forEach(wp => {
     wpMap[wp.id] = wp
   })
-  
+
   ctx.strokeStyle = theme === 'dark' ? 'rgba(59, 130, 246, 0.5)' : 'rgba(59, 130, 246, 0.7)'
   ctx.lineWidth = 2 / scale.value
-  
+
   const drawnConnections = new Set()
-  
+
   wps.forEach(wp => {
     if (!wp.connections || wp.connections.length === 0) return
-    
+
     wp.connections.forEach(targetId => {
       const connectionKey = [wp.id, targetId].sort().join('-')
       if (drawnConnections.has(connectionKey)) return
       drawnConnections.add(connectionKey)
-      
+
       const targetWp = wpMap[targetId]
       if (!targetWp) return
-      
+
       ctx.beginPath()
       ctx.moveTo(wp.x, wp.y)
       ctx.lineTo(targetWp.x, targetWp.y)
@@ -805,6 +855,7 @@ function drawRoutes(ctx) {
   })
 }
 
+/** 计算机器人在规划路径中的当前进度段索引 */
 function getRouteProgressSegmentIndex(robot, route) {
   if (!route || route.length < 2) return 0
 
@@ -829,6 +880,7 @@ function getRouteProgressSegmentIndex(robot, route) {
   return 0
 }
 
+/** 绘制各机器人的规划路径 */
 function drawRobotRoutes(ctx) {
   const wps = waypoints.value
   if (!wps || wps.length === 0) return
@@ -869,10 +921,11 @@ function loadMapFile() {
   loadMapImage()
 }
 
+/** 从后端加载地图图片 */
 async function loadMapImage() {
   if (mapLoading.value) return
   mapLoading.value = true
-  
+
   try {
     const response = await axios.get('/api/map/image')
     if (response.data && response.data.image) {
@@ -898,28 +951,30 @@ function refreshPositions() {
   loadMapImage()
 }
 
+/** 发送所选机器人到航点 */
 async function sendToWaypoint() {
   if (!selectedRobot.value) return
-  
+
   const availableWps = waypoints.value.filter(wp => !wp.is_charging_station)
   if (availableWps.length === 0) {
     fleetStore.addLog('warning', '没有可用的目标航点')
     return
   }
-  
+
   selectedWaypoint.value = availableWps[0]
   showTaskModal.value = true
 }
 
+/** 发送所选机器人回充电站 */
 async function returnToCharge() {
   if (!selectedRobot.value) return
-  
+
   const chargingWps = waypoints.value.filter(wp => wp.is_charging_station)
   if (chargingWps.length === 0) {
     fleetStore.addLog('warning', '没有可用的充电站')
     return
   }
-  
+
   try {
     const response = await axios.post('/api/tasks', {
       waypoint_id: chargingWps[0].id,
@@ -928,7 +983,7 @@ async function returnToCharge() {
       task_type: 1,
       site_code: 0
     })
-    
+
     if (response.data && response.data.success) {
       fleetStore.addLog('success', `${selectedRobot.value.id} 返回充电站`)
     }
@@ -938,9 +993,10 @@ async function returnToCharge() {
   }
 }
 
+/** 紧急停止所选机器人 */
 async function stopRobot() {
   if (!selectedRobot.value) return
-  
+
   try {
     await axios.post(`/api/robots/${selectedRobot.value.id}/stop`)
     fleetStore.addLog('warning', `${selectedRobot.value.id} 紧急停止`)
@@ -954,11 +1010,12 @@ function createTaskHere() {
   showTaskModal.value = true
 }
 
+/** 确认创建任务 */
 async function confirmTask() {
   if (!taskRobot.value || !selectedWaypoint.value) {
     return
   }
-  
+
   try {
     const response = await axios.post('/api/tasks', {
       waypoint_id: selectedWaypoint.value.id,
@@ -967,7 +1024,7 @@ async function confirmTask() {
       task_type: taskType.value,
       site_code: taskSiteCode.value
     })
-    
+
     if (response.data && response.data.success) {
       fleetStore.addLog('success', `任务 ${response.data.task_id}: ${taskRobot.value} -> ${selectedWaypoint.value.id}`)
     }
@@ -975,7 +1032,7 @@ async function confirmTask() {
     console.error('Failed to create task:', error)
     fleetStore.addLog('error', `任务创建失败: ${error.response?.data?.detail || error.message}`)
   }
-  
+
   showTaskModal.value = false
   taskRobot.value = ''
   taskType.value = 1
@@ -987,6 +1044,7 @@ onMounted(() => {
   loadMapImage()
 })
 
+// 监听地图数据变化、ROS 连接、航点、缩放、偏移等，触发重绘
 watch(mapData, (newData) => {
   if (newData) {
     loadMapImage()

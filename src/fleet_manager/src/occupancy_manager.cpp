@@ -9,27 +9,29 @@ namespace fleet_manager
 
 OccupancyManager::OccupancyManager(rclcpp::Node * node) : node_(node) {}
 
-// ==================== Topology ====================
+// ============================================================================
+// 拓扑注入
+// ============================================================================
 
 void OccupancyManager::set_topology(
   const AdjacencyMap & adj, PoseQuery pq, RadiusQuery rq)
 {
-  adjacency_   = adj;
-  pose_query_  = std::move(pq);
+  adjacency_    = adj;
+  pose_query_   = std::move(pq);
   radius_query_ = std::move(rq);
 
+  // 重建全部航点和边集合
   all_waypoints_.clear();
   all_edges_.clear();
   for (const auto & [wp, conns] : adjacency_) {
     all_waypoints_.insert(wp);
     for (const auto & c : conns) {
       all_waypoints_.insert(c);
-      std::string a = std::min(wp, c);
-      std::string b = std::max(wp, c);
-      all_edges_.insert({a, b});
+      all_edges_.insert({std::min(wp, c), std::max(wp, c)});
     }
   }
 
+  // 清除已不存在的航点的 zone_locks
   for (auto it = zone_locks_.begin(); it != zone_locks_.end(); ) {
     if (all_waypoints_.find(it->first) == all_waypoints_.end())
       it = zone_locks_.erase(it);
@@ -41,7 +43,9 @@ void OccupancyManager::set_topology(
     all_waypoints_.size(), all_edges_.size());
 }
 
-// ==================== Location ====================
+// ============================================================================
+// 位置更新 — 将连续姿态映射为离散航点/航段，并维护 zone_locks
+// ============================================================================
 
 DiscreteLocation OccupancyManager::update_location(
   const std::string & robot_id,
@@ -56,7 +60,7 @@ DiscreteLocation OccupancyManager::update_location(
     return loc;
   }
 
-  // waypoint first
+  // 第一步: 按 capture_radius 判定是否在航点范围内
   std::string best_wp;
   double best_wp_dist = std::numeric_limits<double>::max();
   for (const auto & wp_id : all_waypoints_) {
@@ -77,7 +81,7 @@ DiscreteLocation OccupancyManager::update_location(
     loc.distance = best_wp_dist;
   }
 
-  // segment fallback
+  // 第二步: 不在任何航点 → 判定是否在航段上
   if (loc.type == LocationType::UNKNOWN) {
     double best_seg_dist = std::numeric_limits<double>::max();
     std::string best_from, best_to;
@@ -99,13 +103,13 @@ DiscreteLocation OccupancyManager::update_location(
     }
   }
 
-  // release old zone locks held by this robot
+  // 释放该底盘的旧 zone_locks
   for (auto it = zone_locks_.begin(); it != zone_locks_.end(); ) {
     if (it->second == robot_id) it = zone_locks_.erase(it);
     else ++it;
   }
 
-  // set new zone locks — never overwrite another robot's lock
+  // 设置新 zone_locks — 绝不覆盖其他底盘的锁(碰撞告警)
   auto safe_set = [&](const std::string & wp) {
     auto existing = zone_locks_.find(wp);
     if (existing == zone_locks_.end() || existing->second == robot_id) {
@@ -113,9 +117,7 @@ DiscreteLocation OccupancyManager::update_location(
     } else {
       PersistLogger::log_error(
         "occ.zone_collision", robot_id, "",
-        "cannot claim wp=" + wp + " already held by " + existing->second +
-        " (this robot location: " +
-        (loc.type == LocationType::WAYPOINT ? "at " + loc.waypoint_id : "on " + loc.segment_str()) + ")",
+        "cannot claim wp=" + wp + " already held by " + existing->second,
         __FILE__, __LINE__, __func__);
     }
   };
@@ -129,7 +131,7 @@ DiscreteLocation OccupancyManager::update_location(
 
   robot_locations_[robot_id] = loc;
 
-  // clear reservation if robot reached the reserved waypoint
+  // 到达预留航点时自动清除预留
   auto res_it = reservations_.find(robot_id);
   if (res_it != reservations_.end()) {
     if ((loc.type == LocationType::WAYPOINT && loc.waypoint_id == res_it->second) ||
@@ -168,7 +170,9 @@ void OccupancyManager::clear_robot(const std::string & robot_id)
   }
 }
 
-// ==================== Safety checks ====================
+// ============================================================================
+// 安全检查
+// ============================================================================
 
 std::string OccupancyManager::can_enter(
   const std::string & robot_id,
@@ -177,20 +181,17 @@ std::string OccupancyManager::can_enter(
 {
   if (to_wp.empty() || from_wp.empty() || to_wp == from_wp) return "invalid";
 
-  // check zone lock (physical occupancy)
+  // zone_lock 检查 (物理占用)
   auto zl = zone_locks_.find(to_wp);
   if (zl != zone_locks_.end() && zl->second != robot_id) return zl->second;
 
-  // check reservations by other robots
+  // 预留检查 (其他底盘的预约)
   for (const auto & [rid, wp] : reservations_) {
     if (rid == robot_id) continue;
     if (wp == to_wp) return rid;
   }
 
-  // check if edge from->to is occupied: robot on this edge holds both endpoint zones
-  // already covered by zone_locks check above (both from and to would be locked)
-
-  return "";  // clear
+  return "";  // 畅通
 }
 
 std::string OccupancyManager::waypoint_blocker(
@@ -207,7 +208,9 @@ std::string OccupancyManager::waypoint_blocker(
   return "";
 }
 
-// ==================== Reservations ====================
+// ============================================================================
+// 预留管理
+// ============================================================================
 
 bool OccupancyManager::reserve_next(
   const std::string & robot_id,
@@ -259,7 +262,9 @@ void OccupancyManager::expire_stale_reservations()
   }
 }
 
-// ==================== Queries ====================
+// ============================================================================
+// 查询
+// ============================================================================
 
 DiscreteLocation OccupancyManager::get_location(const std::string & robot_id) const
 {
@@ -295,7 +300,7 @@ std::string OccupancyManager::find_nearest_free_waypoint(
   std::string best;
   double best_dist = std::numeric_limits<double>::max();
 
-  // neighbours first
+  // 优先搜邻居
   auto adj_it = adjacency_.find(from_wp);
   if (adj_it != adjacency_.end()) {
     for (const auto & nb : adj_it->second) {
@@ -310,7 +315,7 @@ std::string OccupancyManager::find_nearest_free_waypoint(
 
   if (!best.empty()) return best;
 
-  // global
+  // 全局搜索
   for (const auto & wp : all_waypoints_) {
     if (wp == from_wp) continue;
     if (std::find(exclude.begin(), exclude.end(), wp) != exclude.end()) continue;
@@ -337,7 +342,9 @@ std::map<std::string, DiscreteLocation> OccupancyManager::get_all_locations() co
   return robot_locations_;
 }
 
-// ==================== Helpers ====================
+// ============================================================================
+// 几何辅助
+// ============================================================================
 
 std::string OccupancyManager::edge_key(const std::string & a, const std::string & b)
 {
@@ -355,7 +362,9 @@ double OccupancyManager::point_to_segment_distance(
   return std::hypot(px - (x1 + t * dx), py - (y1 + t * dy));
 }
 
-// ==================== Ghost locks ====================
+// ============================================================================
+// 幽灵锁 — 离线底盘的延迟清理
+// ============================================================================
 
 void OccupancyManager::mark_ghost(const std::string & robot_id, rclcpp::Time now)
 {
@@ -374,9 +383,9 @@ void OccupancyManager::clear_ghost(const std::string & robot_id)
 bool OccupancyManager::is_holder_active(const std::string & robot_id, rclcpp::Time now, double ttl_sec) const
 {
   auto it = ghost_locks_.find(robot_id);
-  if (it == ghost_locks_.end()) return true;  // not a ghost → active
+  if (it == ghost_locks_.end()) return true;  // 非幽灵 → 活跃
   double age = (now - it->second).seconds();
-  return age < ttl_sec;  // ghost still within TTL → treated as active
+  return age < ttl_sec;  // TTL 内 → 仍视为活跃
 }
 
 void OccupancyManager::expire_ghost_locks(rclcpp::Time now, double ttl_sec)
@@ -395,14 +404,5 @@ void OccupancyManager::expire_ghost_locks(rclcpp::Time now, double ttl_sec)
     ghost_locks_.erase(rid);
   }
 }
-
-// ==================== Ghost-aware safety checks (modified) ====================
-
-// NOTE: The can_enter and waypoint_blocker methods are now ghost-aware.
-// When a zone is held by a robot whose ghost lock has expired, the zone
-// is treated as free. The ttl_sec parameter must be passed from the caller.
-// To avoid changing the public API, the internal check uses a default
-// ghost TTL that is set via expire_ghost_locks. For safety, we add a
-// helper overload that checks ghost_locks_ directly.
 
 }  // namespace fleet_manager

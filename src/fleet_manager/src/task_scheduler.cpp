@@ -7,12 +7,19 @@
 namespace fleet_manager
 {
 
+// ============================================================================
+// 内部状态判定
+// ============================================================================
+
 namespace
 {
+/// 是否处于执行类状态(活跃但未终结)
 bool is_like_executing(const std::string & s)
 {
   return s == "assigned" || s == "in_progress" || s == "executing" || s == "waiting_fleet";
 }
+
+/// 是否已终结
 bool is_finished(const std::string & s)
 {
   return s == "completed" || s == "failed" || s == "cancelled";
@@ -20,6 +27,10 @@ bool is_finished(const std::string & s)
 }  // namespace
 
 TaskScheduler::TaskScheduler(rclcpp::Node * node) : node_(node) {}
+
+// ============================================================================
+// 内部工具
+// ============================================================================
 
 void TaskScheduler::remove_from_queue(const std::string & task_id)
 {
@@ -38,7 +49,9 @@ std::string TaskScheduler::generate_id()
   return "task_" + std::to_string(ms) + "_" + std::to_string(counter_++);
 }
 
-// ==================== Public API ====================
+// ============================================================================
+// 任务提交
+// ============================================================================
 
 std::string TaskScheduler::submit_task(
   const std::string & waypoint_id, int priority,
@@ -59,7 +72,7 @@ std::string TaskScheduler::submit_task(
 
   queue_.push(t);
   all_[t.task_id] = t;
-  if (!robot_id.empty()) fixed_.insert(t.task_id);
+  if (!robot_id.empty()) fixed_.insert(t.task_id);  // 指定了底盘 → 固定分配
 
   PersistLogger::log_info("sched.submit", robot_id, t.task_id,
     "wp=" + waypoint_id + " pri=" + std::to_string(priority) +
@@ -68,6 +81,10 @@ std::string TaskScheduler::submit_task(
 
   return t.task_id;
 }
+
+// ============================================================================
+// 批量分配 — 优先级队列 + 最近距离贪心 + FCFS 门控(30s 超时)
+// ============================================================================
 
 std::vector<fleet_msgs::msg::TaskInfo> TaskScheduler::assign_tasks_batch(
   const std::vector<fleet_msgs::msg::RobotStatus> & robots,
@@ -79,19 +96,19 @@ std::vector<fleet_msgs::msg::TaskInfo> TaskScheduler::assign_tasks_batch(
 
   waypoint_poses_ = waypoint_poses;
 
-  // collect available robots
+  // 收集在线底盘
   std::set<std::string> avail;
   for (const auto & r : robots)
     if (r.connection_status == "online") avail.insert(r.robot_id);
 
-  // remove robots that already have active tasks
+  // 排除已有执行类任务的底盘
   for (const auto & [_, t] : all_) {
     if (t.assigned_robot_id.empty()) continue;
     if (is_finished(t.status)) continue;
     if (is_like_executing(t.status)) avail.erase(t.assigned_robot_id);
   }
 
-  // drain queue into pending vector in priority order
+  // 将队列按优先级弹出到 pending 向量
   std::vector<fleet_msgs::msg::TaskInfo> pending;
   while (!queue_.empty()) {
     auto t = queue_.top(); queue_.pop();
@@ -102,7 +119,7 @@ std::vector<fleet_msgs::msg::TaskInfo> TaskScheduler::assign_tasks_batch(
     pending.push_back(it->second);
   }
 
-  // reserve robots for fixed pending tasks
+  // fixed 任务预留底盘(先到先得)
   std::map<std::string, std::string> reserved_by_fixed;
   for (const auto & t : pending) {
     if (t.assigned_robot_id.empty()) continue;
@@ -111,7 +128,7 @@ std::vector<fleet_msgs::msg::TaskInfo> TaskScheduler::assign_tasks_batch(
   }
   for (const auto & [rid, _] : reserved_by_fixed) avail.erase(rid);
 
-  // greedy assignment with FCFS gate
+  // 贪心分配 + FCFS 门控
   std::vector<fleet_msgs::msg::TaskInfo> unmatched;
   size_t processed = 0;
 
@@ -119,6 +136,7 @@ std::vector<fleet_msgs::msg::TaskInfo> TaskScheduler::assign_tasks_batch(
     auto task = pending[i];
     processed = i + 1;
 
+    // 跳过不存在于交通图的航点
     auto wp_it = waypoint_poses.find(task.waypoint_id);
     if (wp_it == waypoint_poses.end()) { unmatched.push_back(task); continue; }
 
@@ -126,14 +144,14 @@ std::vector<fleet_msgs::msg::TaskInfo> TaskScheduler::assign_tasks_batch(
     double best_dist = std::numeric_limits<double>::max();
 
     if (!task.assigned_robot_id.empty()) {
-      // fixed robot task
+      // fixed 任务: 检查指定底盘是否可用或被预留
       const auto rsv = reserved_by_fixed.find(task.assigned_robot_id);
       if ((rsv != reserved_by_fixed.end() && rsv->second == task.task_id) ||
           avail.count(task.assigned_robot_id)) {
         best = task.assigned_robot_id;
       }
     } else {
-      // nearest available
+      // 普通任务: 选距离目标最近的可用底盘
       for (const auto & r : robots) {
         if (!avail.count(r.robot_id)) continue;
         double d = std::hypot(
@@ -145,11 +163,10 @@ std::vector<fleet_msgs::msg::TaskInfo> TaskScheduler::assign_tasks_batch(
 
     if (best.empty()) {
       unmatched.push_back(task);
-      // fixed tasks don't block the FCFS gate
+      // fixed 任务不阻塞 FCFS 门控(等指定底盘空闲)
       if (!task.assigned_robot_id.empty()) continue;
 
-      // FCFS gate with timeout: if same task blocks repeatedly,
-      // skip it to avoid starving lower-priority tasks
+      // FCFS 门控超时: 连续阻塞 > 30 ticks 则跳过
       auto & skip_count = fcfc_skip_count_[task.task_id];
       skip_count++;
       if (skip_count >= kFcfcGateMaxSkips) {
@@ -157,12 +174,12 @@ std::vector<fleet_msgs::msg::TaskInfo> TaskScheduler::assign_tasks_batch(
           "FCFS gate blocked " + std::to_string(skip_count) + " ticks, skipping",
           __FILE__, __LINE__, __func__);
         skip_count = 0;
-        continue;  // skip this task, continue to lower-priority
+        continue;
       }
-      break;  // FCFS gate
+      break;
     }
 
-    fcfc_skip_count_.erase(task.task_id);  // reset on successful assignment
+    fcfc_skip_count_.erase(task.task_id);  // 分配成功 → 重置门控计数
 
     task.assigned_robot_id = best;
     task.status = "assigned";
@@ -174,12 +191,16 @@ std::vector<fleet_msgs::msg::TaskInfo> TaskScheduler::assign_tasks_batch(
     if (avail.empty()) break;
   }
 
-  // re-queue unmatched
+  // 未分配的任务重新入队
   for (const auto & t : unmatched) queue_.push(t);
   for (size_t i = processed; i < pending.size(); ++i) queue_.push(pending[i]);
 
   return results;
 }
+
+// ============================================================================
+// 状态转换
+// ============================================================================
 
 void TaskScheduler::mark_task_navigating(const std::string & task_id)
 {
@@ -218,7 +239,7 @@ void TaskScheduler::mark_task_pending(const std::string & task_id)
   const bool is_fixed = fixed_.count(task_id);
   remove_from_queue(task_id);
   it->second.status = "pending";
-  if (!is_fixed) it->second.assigned_robot_id.clear();
+  if (!is_fixed) it->second.assigned_robot_id.clear();  // 非 fixed 任务释放底盘绑定
   queue_.push(it->second);
 }
 
@@ -230,8 +251,9 @@ void TaskScheduler::mark_task_pending_preserve(const std::string & task_id)
 
   remove_from_queue(task_id);
   it->second.status = "pending";
-  // keep assigned_robot_id binding (do NOT clear)
-  retry_cycle_count_[task_id]++;  // track re-queue count
+  // 保留 assigned_robot_id 绑定不清除
+  retry_cycle_count_[task_id]++;
+
   queue_.push(it->second);
 
   PersistLogger::log_info("sched.preserve", it->second.assigned_robot_id, task_id,
@@ -254,13 +276,17 @@ int TaskScheduler::retry_cycle_count(const std::string & task_id) const
   return (it != retry_cycle_count_.end()) ? it->second : 0;
 }
 
+// ============================================================================
+// 终结操作(带终态保护)
+// ============================================================================
+
 void TaskScheduler::complete_task(const std::string & task_id)
 {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   remove_from_queue(task_id);
   auto it = all_.find(task_id);
   if (it != all_.end()) {
-    if (is_finished(it->second.status)) return;
+    if (is_finished(it->second.status)) return;  // 拒绝覆盖已终结状态
     it->second.status = "completed";
     it->second.completed_at = node_->now();
     retry_cycle_count_.erase(task_id);
@@ -290,7 +316,6 @@ void TaskScheduler::cancel_task(const std::string & task_id)
   remove_from_queue(task_id);
   auto it = all_.find(task_id);
   if (it != all_.end()) {
-    // Guard: don't overwrite already-terminal status
     if (is_finished(it->second.status)) return;
     it->second.status = "cancelled";
     fixed_.erase(task_id);
@@ -300,6 +325,10 @@ void TaskScheduler::cancel_task(const std::string & task_id)
       "task cancelled", __FILE__, __LINE__, __func__);
   }
 }
+
+// ============================================================================
+// 查询
+// ============================================================================
 
 uint8_t TaskScheduler::get_task_type(const std::string & task_id) const
 {
@@ -333,10 +362,14 @@ size_t TaskScheduler::pending_count() const
   return n;
 }
 
+// ============================================================================
+// 维护
+// ============================================================================
+
 void TaskScheduler::repair_queue()
 {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
-  // Rebuild queue from scratch: O(n log n) instead of O(n²)
+  // 从 all_ 全量重建队列 O(n log n)
   decltype(queue_) fresh;
   for (const auto & [id, t] : all_) {
     if (t.status == "pending") fresh.push(t);
@@ -353,6 +386,7 @@ void TaskScheduler::purge_finished(size_t max_keep)
 
   if (fin.size() <= max_keep) return;
 
+  // 保留最新的 max_keep 个，删除更老的
   std::sort(fin.begin(), fin.end(),
     [](auto & a, auto & b) { return a.second > b.second; });
 

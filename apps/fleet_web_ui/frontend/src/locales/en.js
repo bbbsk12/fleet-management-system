@@ -1,7 +1,19 @@
+// ============================================================================
+//  英文翻译资源 —— locales/en.js
+//  功能：定义系统所有 UI 文本的英文翻译键值对
+//        按功能模块分组，供国际化引擎按需加载
+// ============================================================================
+
 export default {
+  // ========================================================================
+  //  应用全局
+  // ========================================================================
   'app.title': 'Fleet Management System',
   'app.subtitle': 'Fleet Management System',
 
+  // ========================================================================
+  //  侧边导航栏
+  // ========================================================================
   'sidebar.dashboard': 'Dashboard',
   'sidebar.fleet': 'Fleet Monitor',
   'sidebar.tasks': 'Task Dispatch',
@@ -9,6 +21,9 @@ export default {
   'sidebar.logs': 'System Logs',
   'sidebar.settings': 'Settings',
 
+  // ========================================================================
+  //  通用组件
+  // ========================================================================
   'common.search': 'Search',
   'common.filter': 'Filter',
   'common.all': 'All',
@@ -58,6 +73,9 @@ export default {
   'common.pleaseSelect': 'Please select',
   'common.unassigned': 'Unassigned',
 
+  // ========================================================================
+  //  控制中心（Dashboard）
+  // ========================================================================
   'dashboard.title': 'Dashboard',
   'dashboard.subtitle': 'Real-time system monitoring',
   'dashboard.fleetStatus': 'Fleet Status',
@@ -84,6 +102,9 @@ export default {
   'dashboard.working': 'Working',
   'dashboard.assigned': 'Assigned',
 
+  // ========================================================================
+  //  车队监控（Fleet Monitor）
+  // ========================================================================
   'fleet.title': 'Fleet Monitor',
   'fleet.subtitle': 'Monitor and manage all robots',
   'fleet.searchPlaceholder': 'Search robot ID...',
@@ -117,6 +138,9 @@ export default {
   'fleet.removeRobotSuccess': 'Robot {id} removed from fleet',
   'fleet.removeRobotFailed': 'Failed to remove robot {id}',
 
+  // ========================================================================
+  //  任务调度（Task Dispatch）
+  // ========================================================================
   'tasks.title': 'Task Dispatch',
   'tasks.subtitle': 'Manage task assignment and execution',
   'tasks.createTask': 'Create Task',
@@ -159,6 +183,9 @@ export default {
   'tasks.siteCodePlaceholder': 'Enter site code (0=default)',
   'tasks.executing': 'Executing',
 
+  // ========================================================================
+  //  地图视图（Map View）
+  // ========================================================================
   'map.title': 'Map View',
   'map.subtitle': 'View and manage fleet positions',
   'map.loadMap': 'Load Map',
@@ -182,6 +209,9 @@ export default {
   'map.connections': 'Connections',
   'map.type': 'Type',
 
+  // ========================================================================
+  //  系统日志（System Logs）
+  // ========================================================================
   'logs.title': 'System Logs',
   'logs.subtitle': 'View and manage system logs',
   'logs.exportLogs': 'Export Logs',
@@ -201,6 +231,9 @@ export default {
   'logs.records': 'records',
   'logs.exportSuccess': 'Logs exported successfully',
 
+  // ========================================================================
+  //  系统设置（Settings）
+  // ========================================================================
   'settings.title': 'Settings',
   'settings.subtitle': 'Configure system parameters',
   'settings.resetDefault': 'Reset Default',
@@ -247,6 +280,9 @@ export default {
   'settings.darkMode': 'Dark Mode',
   'settings.lightMode': 'Light Mode',
 
+  // ========================================================================
+  //  侧边栏扩展
+  // ========================================================================
   'sidebar.monitorCenter': 'Monitor Center',
   'sidebar.system': 'System',
   'sidebar.systemStatus': 'System Status',

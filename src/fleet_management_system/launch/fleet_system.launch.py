@@ -2,7 +2,15 @@
 
 """
 FleetOS 总启动文件
-启动核心节点和Web上位机
+==================
+
+功能说明：
+  启动核心 ROS 2 节点和 Web 上位机后端，构成完整车队管理系统。
+  包含：Zenoh Bridge 通信桥梁、Fleet Monitor 交通监控节点、
+  Fleet Manager 调度管理节点、以及可选的 Web 上位机后端。
+
+使用方式：
+  ros2 launch fleet_management_system fleet_system.launch.py
 """
 
 import os
@@ -15,16 +23,14 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    # 获取包路径
+    """生成启动描述，包含所有参数声明和节点启动配置。"""
+
+    # ---- 获取包路径 ----
     pkg_share = get_package_share_directory('fleet_management_system')
-    
-    # 获取工作空间根目录（更可靠）
-    # get_package_prefix -> <ws>/install/fleet_management_system
-    # workspace_root -> <ws>
     pkg_prefix = get_package_prefix('fleet_management_system')
     workspace_root = os.path.dirname(os.path.dirname(pkg_prefix))
-    
-    # 参数定义
+
+    # ---- 参数定义 ----
     traffic_map_file = LaunchConfiguration('traffic_map_file')
     use_web = LaunchConfiguration('use_web')
     web_port = LaunchConfiguration('web_port')
@@ -44,12 +50,14 @@ def generate_launch_description():
 
     waypoint_acceptance_radius = LaunchConfiguration('waypoint_acceptance_radius')
     traffic_segment_lateral_max = LaunchConfiguration('traffic_segment_lateral_max')
-    
+
+    # ---- 默认路径配置 ----
     # 默认地图路径（安装后从 share 目录读取）
     default_map = os.path.join(pkg_share, 'maps', 'map0', 'rmf_map0.yaml')
     default_zenoh_bridge_config = os.path.join(
         pkg_share, 'config', 'zenoh', 'host-bridge.json5')
 
+    # Web 后端路径（优先使用安装目录，回退到源码目录）
     installed_web_backend_path = os.path.join(
         pkg_share, 'web_ui', 'backend', 'server_ros2.py')
     source_web_backend_path = os.path.join(
@@ -60,32 +68,33 @@ def generate_launch_description():
         else source_web_backend_path
     )
 
-    # 运行时数据目录：持久化日志和 Web UI 设置文件
-    # 注意：pkg_share 通常位于 install/，可能是只读；运行时可写数据应放到 workspace_root 下。
+    # 运行时数据目录：持久化日志和 Web UI 配置文件
+    # 注意：pkg_share 通常位于 install/，可能为只读；运行时可写数据应放到 workspace_root 下。
     default_persist_dir = os.path.join(workspace_root, 'test_logs')
     runtime_dir = os.path.join(workspace_root, 'runtime')
     default_settings_file = os.path.join(runtime_dir, 'webui_settings.json')
-    
+
     return LaunchDescription([
+
         # ============ 参数声明 ============
         DeclareLaunchArgument(
             'traffic_map_file',
             default_value=default_map,
             description='交通图文件路径'
         ),
-        
+
         DeclareLaunchArgument(
             'use_web',
             default_value='true',
-            description='是否启动Web上位机'
+            description='是否启动 Web 上位机'
         ),
-        
+
         DeclareLaunchArgument(
             'web_port',
             default_value='8080',
-            description='Web后端端口'
+            description='Web 后端端口'
         ),
-        
+
         DeclareLaunchArgument(
             'zenoh_bridge_config',
             default_value=default_zenoh_bridge_config,
@@ -125,7 +134,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'persist_log_verbose_info',
             default_value='false',
-            description='是否在持久化日志里包含 INFO（会更大）'
+            description='是否在持久化日志中包含 INFO 级别信息（文件会更大）'
         ),
 
         DeclareLaunchArgument(
@@ -158,17 +167,17 @@ def generate_launch_description():
             description='航段横向偏差最大阈值（米）'
         ),
 
-        # Ensure runtime dir exists for web settings
+        # 确保运行时目录存在（用于 Web 配置文件的写入）
         ExecuteProcess(
             cmd=['bash', '-lc', f'mkdir -p "{runtime_dir}"'],
             output='screen'
         ),
-        
-        # ============ Zenoh Bridge ============
+
+        # ============ Zenoh Bridge 启动 ============
         LogInfo(msg='>>> 启动 Zenoh Bridge...'),
 
-        # Wait for local zenohd endpoint to avoid startup race:
-        # bridge starts too early -> routes may flap and remote entities retire.
+        # 等待本地 zenohd 端点就绪，避免启动竞态：
+        # bridge 启动过早可能导致路由抖动和远程实体注销。
         ExecuteProcess(
             cmd=['bash', '-lc',
                  'for i in {1..60}; do '
@@ -179,7 +188,7 @@ def generate_launch_description():
                  'exit 1'],
             output='screen'
         ),
-        
+
         ExecuteProcess(
             cmd=['zenoh-bridge-ros2dds', '-c', zenoh_bridge_config],
             name='zenoh_bridge',
@@ -189,26 +198,25 @@ def generate_launch_description():
                 'ZENOH_ROUTER': zenoh_router,
             }
         ),
-        
-        # ============ 核心节点 ============
+
+        # ============ 核心节点：Fleet Monitor ============
         LogInfo(msg='>>> 启动 Fleet Monitor...'),
-        
+
         Node(
             package='fleet_monitor',
             executable='fleet_monitor_node',
             name='fleet_monitor',
             output='screen',
-            parameters=[{
-                'traffic_map_file': traffic_map_file
-            }],
+            parameters=[{'traffic_map_file': traffic_map_file}],
             additional_env={
                 'ROS_DOMAIN_ID': ros_domain_id,
                 'ZENOH_ROUTER': zenoh_router,
             }
         ),
-        
+
+        # ============ 核心节点：Fleet Manager ============
         LogInfo(msg='>>> 启动 Fleet Manager...'),
-        
+
         Node(
             package='fleet_manager',
             executable='fleet_manager_node',
@@ -225,18 +233,17 @@ def generate_launch_description():
                 'chassis_handshake_timeout_sec': chassis_handshake_timeout_sec,
                 'chassis_exec_timeout_sec': chassis_exec_timeout_sec,
                 'chassis_max_retries': chassis_max_retries,
-            }]
-            ,
+            }],
             additional_env={
                 'ROS_DOMAIN_ID': ros_domain_id,
                 'ZENOH_ROUTER': zenoh_router,
             }
         ),
-        
-        # ============ Web上位机（可选）============
-        LogInfo(msg='>>> 启动 Web Backend...', 
+
+        # ============ Web 上位机（可选） ============
+        LogInfo(msg='>>> 启动 Web Backend...',
                 condition=IfCondition(use_web)),
-        
+
         ExecuteProcess(
             cmd=[
                 'python3',

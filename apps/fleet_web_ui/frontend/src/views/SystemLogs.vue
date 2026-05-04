@@ -1,12 +1,14 @@
 <template>
   <div class="space-y-4 sm:space-y-6">
+    <!-- 页面头部：标题与操作按钮 -->
     <div class="flex items-center justify-between flex-wrap gap-2 sm:gap-4">
       <div>
         <h1 class="text-xl sm:text-2xl font-bold tracking-wide" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">{{ t('logs.title') }}</h1>
         <p class="text-xs sm:text-sm mt-0.5" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-500'">{{ t('logs.subtitle') }}</p>
       </div>
       <div class="flex gap-2">
-        <button 
+        <!-- 导出日志按钮 -->
+        <button
           class="px-3 py-2 rounded-lg text-sm transition-colors flex items-center gap-2"
           :class="theme === 'dark' ? 'bg-industrial-700 border border-industrial-600 text-gray-300 hover:bg-industrial-600' : 'bg-gray-100 border border-gray-200 text-gray-600 hover:bg-gray-200'"
           @click="exportLogs"
@@ -14,7 +16,8 @@
           <Download class="w-4 h-4" />
           {{ t('logs.exportLogs') }}
         </button>
-        <button 
+        <!-- 清除日志按钮 -->
+        <button
           class="px-3 py-2 rounded-lg bg-cyber-red/20 border border-cyber-red/40 text-cyber-red text-sm hover:bg-cyber-red/30 transition-colors flex items-center gap-2"
           @click="clearLogs"
         >
@@ -24,27 +27,30 @@
       </div>
     </div>
 
+    <!-- 日志筛选与搜索栏 -->
     <div class="data-card rounded-xl p-4 neon-border">
       <div class="flex flex-wrap items-center gap-4">
+        <!-- 日志级别标签切换 -->
         <div class="flex flex-wrap gap-1 p-1 rounded-lg" :class="theme === 'dark' ? 'bg-industrial-800' : 'bg-gray-100'">
-          <button 
-            v-for="tab in levelTabs" 
+          <button
+            v-for="tab in levelTabs"
             :key="tab.value"
             class="px-3 py-1.5 rounded-md text-xs font-medium transition-all"
-            :class="levelFilter === tab.value 
-              ? 'bg-cyber-blue/20 text-cyber-blue border border-cyber-blue/40' 
+            :class="levelFilter === tab.value
+              ? 'bg-cyber-blue/20 text-cyber-blue border border-cyber-blue/40'
               : (theme === 'dark' ? 'text-gray-400 hover:text-white' : 'text-gray-500 hover:text-gray-900')"
             @click="levelFilter = tab.value"
           >
             {{ tab.label }}
           </button>
         </div>
-        
+
+        <!-- 搜索输入框 -->
         <div class="flex-1 min-w-[200px]">
           <div class="relative">
             <Search class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'" />
-            <input 
-              type="text" 
+            <input
+              type="text"
               v-model="searchQuery"
               :placeholder="t('logs.searchPlaceholder')"
               class="w-full pl-10 pr-4 py-2 rounded-lg text-sm focus:border-cyber-blue focus:outline-none transition-colors"
@@ -54,7 +60,8 @@
         </div>
       </div>
     </div>
-    
+
+    <!-- 日志统计概览卡片 -->
     <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
       <div class="data-card rounded-lg sm:rounded-xl p-3 sm:p-4 neon-border">
         <div class="flex items-center gap-2 sm:gap-3">
@@ -101,8 +108,10 @@
         </div>
       </div>
     </div>
-    
+
+    <!-- 日志记录列表 -->
     <div class="data-card rounded-xl p-0 neon-border overflow-hidden">
+      <!-- 列表头部 -->
       <div class="flex items-center justify-between p-4" :class="theme === 'dark' ? 'border-industrial-700' : 'border-gray-200'" style="border-bottom-width: 1px; border-bottom-style: solid;">
         <h3 class="text-lg font-bold flex items-center gap-2" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">
           <FileText class="w-5 h-5 text-cyber-blue" />
@@ -110,10 +119,11 @@
         </h3>
         <span class="text-sm" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-500'">{{ filteredLogs.length }} {{ t('logs.records') }}</span>
       </div>
+      <!-- 日志条目滚动区域 -->
       <div class="max-h-[400px] overflow-y-auto">
-        <div 
-          v-for="(log, index) in filteredLogs" 
-          :key="index" 
+        <div
+          v-for="(log, index) in filteredLogs"
+          :key="index"
           class="p-4 cursor-pointer transition-colors"
           :class="theme === 'dark' ? 'border-industrial-700/50 hover:bg-industrial-700/30' : 'border-gray-100 hover:bg-gray-50'"
           style="border-bottom-width: 1px; border-bottom-style: solid;"
@@ -121,7 +131,7 @@
         >
           <div class="flex items-start gap-3">
             <span class="text-xs font-mono mt-0.5 shrink-0" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'">{{ log.time }}</span>
-            <span 
+            <span
               class="px-2 py-0.5 rounded text-xs font-medium shrink-0"
               :class="logLevelClass(log.level)"
             >
@@ -132,11 +142,13 @@
             </span>
             <span class="text-sm" :class="theme === 'dark' ? 'text-gray-300' : 'text-gray-600'">{{ log.message }}</span>
           </div>
+          <!-- 展开的日志详情 -->
           <div v-if="expandedLog === index && log.details" class="mt-3 p-3 rounded-lg" :class="theme === 'dark' ? 'bg-industrial-800' : 'bg-gray-100'">
             <pre class="text-xs font-mono whitespace-pre-wrap" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">{{ log.details }}</pre>
           </div>
         </div>
-        
+
+        <!-- 空日志占位 -->
         <div v-if="filteredLogs.length === 0" class="py-12 text-center">
           <FileText class="w-12 h-12 mx-auto mb-3" :class="theme === 'dark' ? 'text-gray-600' : 'text-gray-300'" />
           <p :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">{{ t('logs.noLogs') }}</p>
@@ -151,8 +163,8 @@ import { ref, computed } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useFleetStore } from '../stores/fleet'
 import { useSettingsStore } from '../stores/settings'
-import { 
-  Download, Trash2, Search, FileText, Info, AlertTriangle, 
+import {
+  Download, Trash2, Search, FileText, Info, AlertTriangle,
   XCircle
 } from 'lucide-vue-next'
 
@@ -165,6 +177,7 @@ const levelFilter = ref('all')
 const searchQuery = ref('')
 const expandedLog = ref(null)
 
+// 日志级别筛选标签配置
 const levelTabs = computed(() => [
   { value: 'all', label: t('common.all') },
   { value: 'info', label: t('logs.info') },
@@ -173,10 +186,12 @@ const levelTabs = computed(() => [
   { value: 'success', label: t('logs.success') }
 ])
 
+// 全部日志（按时间倒序）
 const allLogs = computed(() => {
   return [...fleetStore.logs].sort((a, b) => b.time.localeCompare(a.time))
 })
 
+// 根据级别筛选和搜索关键词过滤日志
 const filteredLogs = computed(() => {
   let logs = allLogs.value
   if (levelFilter.value !== 'all') {
@@ -189,6 +204,7 @@ const filteredLogs = computed(() => {
   return logs
 })
 
+// 日志统计信息
 const logStats = computed(() => {
   const logs = allLogs.value
   return {
@@ -199,6 +215,7 @@ const logStats = computed(() => {
   }
 })
 
+/** 获取日志级别样式类 */
 function logLevelClass(level) {
   const classes = {
     info: 'bg-cyber-blue/20 text-cyber-blue',
@@ -209,10 +226,12 @@ function logLevelClass(level) {
   return classes[level] || 'bg-gray-500/20 text-gray-400'
 }
 
+/** 切换日志展开状态 */
 function toggleExpand(index) {
   expandedLog.value = expandedLog.value === index ? null : index
 }
 
+/** 导出日志为 JSON 文件 */
 function exportLogs() {
   const data = JSON.stringify(filteredLogs.value, null, 2)
   const blob = new Blob([data], { type: 'application/json' })
@@ -225,6 +244,7 @@ function exportLogs() {
   fleetStore.addLog('success', t('logs.exportSuccess'))
 }
 
+/** 清除所有日志 */
 function clearLogs() {
   if (confirm(t('logs.confirmClear'))) {
     fleetStore.logs = []

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-机器人底盘检测工具 - 通过Zenoh检测
-支持跨 ROS_DOMAIN_ID 检测连接的底盘
+机器人底盘检测工具 —— CLI 命令行版本。
+
+通过 Zenoh 进行跨 ROS_DOMAIN_ID 的机器人底盘发现，
+支持单次检测、JSON 输出与持续监控模式。
 """
 
 import subprocess
@@ -27,7 +29,7 @@ except ImportError:
         print_json_payload,
     )
 
-# 尝试导入 zenoh
+# ---- Zenoh 依赖检查 ----
 try:
     import zenoh
     HAS_ZENOH = True
@@ -36,12 +38,19 @@ except ImportError:
 
 
 def check_zenohd_running() -> bool:
-    """检查zenohd是否运行"""
+    """检查 zenohd 守护进程是否正在运行。"""
     return check_zenohd_running_impl()
 
 
 def detect_robots_via_zenoh(zenoh_router: str) -> Dict[str, RobotInfo]:
-    """通过Zenoh检测机器人（支持跨DOMAIN_ID）"""
+    """通过 Zenoh 检测机器人（支持跨 ROS_DOMAIN_ID）。
+
+    参数:
+        zenoh_router: Zenoh 路由器地址字符串。
+
+    返回:
+        命名空间到机器人信息对象的映射字典。
+    """
     if not HAS_ZENOH:
         print("错误: 需要安装 zenoh-python")
         print("安装命令: pip install eclipse-zenoh")
@@ -50,11 +59,17 @@ def detect_robots_via_zenoh(zenoh_router: str) -> Dict[str, RobotInfo]:
 
 
 def print_results(robots: Dict[str, RobotInfo], zenoh_router: str):
-    """打印检测结果"""
+    """打印检测结果到控制台。
+
+    参数:
+        robots: 命名空间到机器人信息对象的映射字典。
+        zenoh_router: 使用的 Zenoh 路由器地址。
+    """
     print_results_impl(robots, zenoh_router)
 
 
 def main():
+    """CLI 入口函数：解析命令行参数并执行检测流程。"""
     parser = argparse.ArgumentParser(description='通过Zenoh检测机器人底盘（支持跨ROS_DOMAIN_ID）')
     parser.add_argument(
         '--router', '-r',
@@ -86,6 +101,7 @@ def main():
         sys.exit(1)
 
     if args.watch:
+        # ---- 持续监控模式 ----
         print("持续监控模式 (Ctrl+C 退出)")
         try:
             while True:
@@ -96,6 +112,7 @@ def main():
         except KeyboardInterrupt:
             print("\n监控已停止")
     else:
+        # ---- 单次检测模式 ----
         robots = detect_robots_via_zenoh(args.router)
         if args.json:
             print_json_payload(robots, args.router)

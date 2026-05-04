@@ -1,5 +1,12 @@
+// ============================================================================
+//  路由配置 —— router/index.js
+//  功能：定义前端路由表，配置页面路径与对应组件的懒加载关系
+// ============================================================================
+
 import { createRouter, createWebHistory } from 'vue-router'
 
+// ---- 路由表定义 ----
+// 所有页面均采用懒加载方式，按需加载对应视图组件
 const routes = [
   {
     path: '/',
@@ -39,6 +46,8 @@ const routes = [
   }
 ]
 
+// ---- 创建路由实例 ----
+// 使用 HTML5 History 模式，避免 URL 中携带 # 号
 const router = createRouter({
   history: createWebHistory(),
   routes

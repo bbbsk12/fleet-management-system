@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
-"""Poll fleet Web API and verify traffic rules (same as user constraints ①②).
+"""
+车队调度规则监控工具
+=====================
 
-① 同一航点或同一航线上不能有多台车（离散：两车在 same waypoint；或两车在 same undirected edge）
-② 若有车在航点 A，则不允许其它车出现在与 A 相连的航线上（一车在线段 u->v，且另一车在 u 或 v 航点且不是该车自己）
+功能说明：
+  轮询 Fleet Web API 并验证交通规则（即用户约束 ① 和 ②）：
+    ① 同一航点或同一航线上不能有多台车
+       —— 包括：两车位于同一航点；或两车位于同一无向边（航道）上。
+    ② 若有车位于航点 A，则不允许其他车出现在与 A 相连的航线上
+       —— 即一车在线段 u->v 上，且另一车在 u 或 v 航点（且不是该车自己）。
+    ③ 调度能力仅能通过业务场景人工观察，本脚本不判定失败。
 
-③（调度能力）仅能通过业务场景人工观察；本脚本不判失败。
-
-用法:
+使用示例：
   export FLEET_API_BASE=http://127.0.0.1:8080
   python3 scripts/diagnostics/fleet_traffic_rules_monitor.py --once
   python3 scripts/diagnostics/fleet_traffic_rules_monitor.py --interval 0.5 --duration 120
 
-违反规则时进程以非零退出（若 --fail-fast），或打印 violation。
+行为说明：
+  - 检测到违反时，若指定 --fail-fast 则以非零退出，否则打印违规信息。
 """
 from __future__ import annotations
 
@@ -34,6 +40,7 @@ from _lib.traffic_rules import check_traffic_rule_violations
 
 
 def main() -> int:
+    """主函数：解析参数，启动轮询监控循环，检测交通规则违反。"""
     ap = argparse.ArgumentParser()
     add_base_url_arg(ap)
     add_polling_args(ap, default_interval=0.5, allow_duration=True, allow_once=True)
@@ -42,6 +49,7 @@ def main() -> int:
     base = args.base.rstrip("/")
 
     def snapshot() -> Tuple[List[str], Dict]:
+        """获取当前机器人状态快照并检查规则违反。"""
         rdata = http_json(f"{base}/api/robots", timeout=5.0)
         robots = rdata.get("robots") or {}
         v = check_traffic_rule_violations(robots)

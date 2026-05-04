@@ -1,5 +1,6 @@
 <template>
   <div class="space-y-4 sm:space-y-6">
+    <!-- 页面头部：标题与连接状态 -->
     <div class="flex items-center justify-between flex-wrap gap-2 sm:gap-4">
       <div>
         <h1 class="text-xl sm:text-2xl font-bold tracking-wide" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">{{ t('dashboard.title') }}</h1>
@@ -13,34 +14,37 @@
       </div>
     </div>
 
+    <!-- 概览统计卡片：机器人总数、在线数、活跃任务、完成数 -->
     <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-      <DataCard 
-        :title="t('dashboard.robots')" 
-        :value="totalRobots" 
+      <DataCard
+        :title="t('dashboard.robots')"
+        :value="totalRobots"
         :icon="Bot"
         color="blue"
       />
-      <DataCard 
-        :title="t('dashboard.onlineRobots')" 
-        :value="onlineRobots" 
+      <DataCard
+        :title="t('dashboard.onlineRobots')"
+        :value="onlineRobots"
         :icon="Wifi"
         color="green"
       />
-      <DataCard 
-        :title="t('dashboard.activeTasks')" 
-        :value="activeTasks" 
+      <DataCard
+        :title="t('dashboard.activeTasks')"
+        :value="activeTasks"
         :icon="Activity"
         color="orange"
       />
-      <DataCard 
-        :title="t('dashboard.todayTask')" 
-        :value="completedTasks" 
+      <DataCard
+        :title="t('dashboard.todayTask')"
+        :value="completedTasks"
         :icon="CheckCircle"
         color="purple"
       />
     </div>
 
+    <!-- 车队状态与任务队列网格 -->
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-6">
+      <!-- 车队状态表格 -->
       <div class="lg:col-span-2 data-card rounded-lg sm:rounded-xl p-4 sm:p-6 neon-border">
         <div class="flex items-center justify-between mb-4 sm:mb-6">
           <h2 class="text-base sm:text-lg font-semibold" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">{{ t('dashboard.fleetStatus') }}</h2>
@@ -48,7 +52,7 @@
             {{ t('dashboard.viewAll') }}
           </router-link>
         </div>
-        
+
         <div class="overflow-x-auto">
           <table class="w-full">
             <thead>
@@ -60,9 +64,9 @@
               </tr>
             </thead>
             <tbody>
-              <tr 
-                v-for="robot in recentRobots" 
-                :key="robot.id" 
+              <tr
+                v-for="robot in recentRobots"
+                :key="robot.id"
                 class="transition-colors"
                 :class="theme === 'dark' ? 'border-industrial-700/50 hover:bg-industrial-700/30' : 'border-gray-100 hover:bg-gray-50'"
                 style="border-bottom-width: 1px; border-bottom-style: solid;"
@@ -71,7 +75,7 @@
                   <span class="font-medium text-cyber-blue">{{ robot.id }}</span>
                 </td>
                 <td class="py-3 px-4">
-                  <span 
+                  <span
                     class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium"
                     :class="statusClass(robot.status)"
                   >
@@ -82,7 +86,7 @@
                 <td class="py-3 px-4">
                   <div class="flex items-center gap-2">
                     <div class="w-16 h-2 rounded-full overflow-hidden" :class="theme === 'dark' ? 'bg-industrial-700' : 'bg-gray-200'">
-                      <div 
+                      <div
                         class="h-full rounded-full transition-all duration-300"
                         :class="batteryClass(robot.battery)"
                         :style="{ width: robot.battery + '%' }"
@@ -95,6 +99,7 @@
                   {{ robot.current_task || '-' }}
                 </td>
               </tr>
+              <!-- 空数据占位 -->
               <tr v-if="recentRobots.length === 0">
                 <td colspan="4" class="py-8 text-center" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'">
                   {{ t('fleet.noRobots') }}
@@ -105,6 +110,7 @@
         </div>
       </div>
 
+      <!-- 任务队列面板 -->
       <div class="data-card rounded-lg sm:rounded-xl p-4 sm:p-6 neon-border">
         <div class="flex items-center justify-between mb-4 sm:mb-6">
           <h2 class="text-base sm:text-lg font-semibold" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">{{ t('dashboard.taskQueue') }}</h2>
@@ -112,17 +118,17 @@
             {{ t('dashboard.manageTasks') }}
           </router-link>
         </div>
-        
+
         <div class="space-y-3">
-          <div 
-            v-for="task in recentTasks" 
+          <div
+            v-for="task in recentTasks"
             :key="task.id"
             class="p-3 rounded-lg transition-colors"
             :class="theme === 'dark' ? 'bg-industrial-700/50 hover:bg-industrial-700/70' : 'bg-gray-50 hover:bg-gray-100'"
           >
             <div class="flex items-center justify-between mb-2">
               <span class="font-medium" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">{{ task.id }}</span>
-              <span 
+              <span
                 class="px-2 py-0.5 rounded text-xs font-medium"
                 :class="taskStatusClass(task.status)"
               >
@@ -134,7 +140,8 @@
               <span v-if="task.robot_id" class="text-cyber-blue">{{ task.robot_id }}</span>
             </div>
           </div>
-          
+
+          <!-- 空任务占位 -->
           <div v-if="recentTasks.length === 0" class="py-8 text-center" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'">
             <ListTodo class="w-8 h-8 mx-auto mb-2 opacity-50" />
             <p class="text-sm">{{ t('tasks.noTasks') }}</p>
@@ -143,6 +150,7 @@
       </div>
     </div>
 
+    <!-- 最近日志面板 -->
     <div class="data-card rounded-lg sm:rounded-xl p-4 sm:p-6 neon-border">
       <div class="flex items-center justify-between mb-4 sm:mb-6">
           <h2 class="text-base sm:text-lg font-semibold" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">{{ t('dashboard.recentLogs') }}</h2>
@@ -150,16 +158,16 @@
             {{ t('dashboard.viewAll') }}
           </router-link>
         </div>
-        
+
         <div class="space-y-2 max-h-64 overflow-y-auto">
-          <div 
-            v-for="(log, index) in recentLogs" 
+          <div
+            v-for="(log, index) in recentLogs"
             :key="index"
             class="flex items-start gap-3 p-2 rounded transition-colors"
             :class="theme === 'dark' ? 'hover:bg-industrial-700/30' : 'hover:bg-gray-50'"
           >
             <span class="text-xs font-mono shrink-0" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'">{{ log.time }}</span>
-            <span 
+            <span
               class="text-xs px-1.5 py-0.5 rounded font-medium shrink-0"
               :class="logLevelClass(log.level)"
             >
@@ -167,7 +175,8 @@
             </span>
             <span class="text-sm" :class="theme === 'dark' ? 'text-gray-300' : 'text-gray-600'">{{ log.message }}</span>
           </div>
-          
+
+          <!-- 空日志占位 -->
           <div v-if="recentLogs.length === 0" class="py-8 text-center" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'">
             <FileText class="w-8 h-8 mx-auto mb-2 opacity-50" />
             <p class="text-sm">{{ t('logs.noLogs') }}</p>
@@ -190,13 +199,16 @@ const settingsStore = useSettingsStore()
 const { language, theme } = storeToRefs(settingsStore)
 const { t } = settingsStore
 
+// ROS 连接与统计信息
 const rosConnected = computed(() => fleetStore.rosConnected)
 const totalRobots = computed(() => fleetStore.totalRobots)
 const onlineRobots = computed(() => fleetStore.onlineRobots)
 const activeTasks = computed(() => fleetStore.activeTasks)
 
+// 已完成任务数
 const completedTasks = computed(() => fleetStore.tasks.filter(t => t.status === 'completed').length)
 
+// 最近 5 台机器人
 const recentRobots = computed(() => {
   return Object.entries(fleetStore.robots)
     .slice(0, 5)
@@ -206,14 +218,17 @@ const recentRobots = computed(() => {
     }))
 })
 
+// 最近 5 条任务
 const recentTasks = computed(() => {
   return fleetStore.tasks.slice(0, 5)
 })
 
+// 最近 8 条日志
 const recentLogs = computed(() => {
   return fleetStore.logs.slice(0, 8)
 })
 
+/** 获取机器人状态文本 */
 function statusText(status) {
   const map = {
     online: t('common.online'),
@@ -225,6 +240,7 @@ function statusText(status) {
   return map[status] || status
 }
 
+/** 获取机器人状态样式类 */
 function statusClass(status) {
   const classes = {
     online: 'bg-cyber-green/20 text-cyber-green',
@@ -236,6 +252,7 @@ function statusClass(status) {
   return classes[status] || 'bg-gray-500/20 text-gray-400'
 }
 
+/** 获取机器人状态圆点样式 */
 function statusDotClass(status) {
   const classes = {
     online: 'bg-cyber-green',
@@ -247,12 +264,14 @@ function statusDotClass(status) {
   return classes[status] || 'bg-gray-500'
 }
 
+/** 根据电量百分比返回对应颜色 */
 function batteryClass(battery) {
   if (battery > 60) return 'bg-cyber-green'
   if (battery > 20) return 'bg-cyber-orange'
   return 'bg-cyber-red'
 }
 
+/** 获取任务状态文本 */
 function taskStatusText(status) {
   const map = {
     pending: t('tasks.pending'),
@@ -264,6 +283,7 @@ function taskStatusText(status) {
   return map[status] || status
 }
 
+/** 获取任务状态样式类 */
 function taskStatusClass(status) {
   const classes = {
     pending: 'bg-gray-500/20 text-gray-400',
@@ -275,6 +295,7 @@ function taskStatusClass(status) {
   return classes[status] || 'bg-gray-500/20 text-gray-400'
 }
 
+/** 获取日志级别样式类 */
 function logLevelClass(level) {
   const classes = {
     info: 'bg-cyber-blue/20 text-cyber-blue',
@@ -288,6 +309,7 @@ function logLevelClass(level) {
 </script>
 
 <style scoped>
+/* 赛博风格按钮 */
 .btn-cyber {
   @apply relative inline-flex items-center justify-center gap-2;
   @apply bg-gradient-to-r from-cyber-blue/10 to-cyber-blue/5;

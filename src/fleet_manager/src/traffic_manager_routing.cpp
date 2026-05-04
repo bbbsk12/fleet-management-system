@@ -8,7 +8,10 @@
 
 namespace fleet_manager
 {
-// ==================== 寻路 ====================
+
+// ============================================================================
+// 路径规划 — 寻路
+// ============================================================================
 
 std::vector<std::string> TrafficManager::find_path(
   const std::string & from_waypoint,
@@ -18,7 +21,7 @@ std::vector<std::string> TrafficManager::find_path(
 
   std::vector<std::string> path;
 
-  // BFS
+  // 构建邻接表
   std::map<std::string, std::vector<std::string>> adjacency;
   for (const auto & wp : current_map_.waypoints) {
     for (const auto & conn : wp.connections) {
@@ -26,6 +29,7 @@ std::vector<std::string> TrafficManager::find_path(
     }
   }
 
+  // BFS 搜索最短路径
   std::queue<std::string> queue;
   std::map<std::string, std::string> parent;
   std::set<std::string> visited;
@@ -60,6 +64,7 @@ std::vector<std::string> TrafficManager::find_path(
     return path;
   }
 
+  // 回溯构建路径
   std::string current = to_waypoint;
   while (!current.empty()) {
     path.push_back(current);
@@ -88,13 +93,13 @@ std::vector<std::string> TrafficManager::find_path_weighted(
 {
   std::lock_guard<std::mutex> lock(mutex_);
 
-  // Dijkstra with weighted costs: occupied edges/waypoints get penalty
-  // Base cost is the physical distance between waypoints.
-  // P0 Fix: Reduced penalty to avoid massive detours. 
-  // A penalty of 10.0 means the robot prefers a detour of up to 10 meters over an occupied edge.
+  // Dijkstra 加权最短路径：被占用的边/航点附加惩罚代价
+  // 基础代价为航点间的欧氏距离
+  // 被占用边的惩罚值 15.0，表示机器人宁愿绕行最多 15 米也不使用被占用的边
   static constexpr double kOccupiedEdgeCost = 15.0;
   static constexpr double kOccupiedWaypointCost = 10.0;
 
+  // 构建邻接表与航点位置映射
   std::map<std::string, std::vector<std::string>> adjacency;
   std::map<std::string, geometry_msgs::msg::Pose> waypoint_poses;
   for (const auto & wp : current_map_.waypoints) {
@@ -104,6 +109,7 @@ std::vector<std::string> TrafficManager::find_path_weighted(
     }
   }
 
+  // 边键归一化：确保 "A|B" 与 "B|A" 被视为同一条边
   auto make_edge_key = [](const std::string & a, const std::string & b) -> std::string {
     return (a < b) ? (a + "|" + b) : (b + "|" + a);
   };
@@ -131,7 +137,7 @@ std::vector<std::string> TrafficManager::find_path_weighted(
     normalized_occupied_edges.insert(normalize_edge_key(key));
   }
 
-  // min-heap: (cost, waypoint_id)
+  // 小顶堆：(累积代价, 航点ID)
   using PQEntry = std::pair<double, std::string>;
   std::priority_queue<PQEntry, std::vector<PQEntry>, std::greater<PQEntry>> pq;
   std::map<std::string, double> dist;
@@ -152,15 +158,16 @@ std::vector<std::string> TrafficManager::find_path_weighted(
       break;
     }
 
-    if (cur_cost > dist[cur]) continue;  // stale entry
+    if (cur_cost > dist[cur]) continue;  // 跳过过期条目
 
     for (const auto & neighbor : adjacency[cur]) {
       double edge_cost = calculate_distance(waypoint_poses[cur], waypoint_poses[neighbor]);
+      // 被占用边附加惩罚
       std::string ek = make_edge_key(cur, neighbor);
       if (normalized_occupied_edges.count(ek)) {
         edge_cost += kOccupiedEdgeCost;
       }
-      // 目标航点被占用时加惩罚（目的地除外，必须可达）
+      // 被占用航点附加惩罚（目标航点除外，必须确保可达）
       if (neighbor != to_waypoint && occupied_waypoints.count(neighbor)) {
         edge_cost += kOccupiedWaypointCost;
       }
@@ -177,10 +184,11 @@ std::vector<std::string> TrafficManager::find_path_weighted(
 
   std::vector<std::string> path;
   if (!found) {
-    // 回退到普通 BFS
+    // 未找到路径时返回空，由调用方回退到普通 BFS
     return path;
   }
 
+  // 回溯构建加权最短路径
   std::string current = to_waypoint;
   while (!current.empty()) {
     path.push_back(current);
@@ -198,12 +206,14 @@ std::vector<geometry_msgs::msg::Pose> TrafficManager::plan_route(
 
   std::vector<geometry_msgs::msg::Pose> path;
 
+  // 查找起点航点
   auto from_it = std::find_if(
     current_map_.waypoints.begin(), current_map_.waypoints.end(),
     [&from_waypoint](const fleet_msgs::msg::Waypoint & wp) {
       return wp.waypoint_id == from_waypoint;
     });
 
+  // 查找终点航点
   auto to_it = std::find_if(
     current_map_.waypoints.begin(), current_map_.waypoints.end(),
     [&to_waypoint](const fleet_msgs::msg::Waypoint & wp) {
@@ -215,11 +225,14 @@ std::vector<geometry_msgs::msg::Pose> TrafficManager::plan_route(
     return path;
   }
 
+  // 插值生成路径点序列
   path = interpolate_path(from_it->pose, to_it->pose);
   return path;
 }
 
-// ==================== 航点查询 ====================
+// ============================================================================
+// 航点查询
+// ============================================================================
 
 geometry_msgs::msg::Pose TrafficManager::get_waypoint_pose(
   const std::string & waypoint_id) const
@@ -281,6 +294,7 @@ std::string TrafficManager::find_nearest_waypoint(
   std::string nearest_wp;
   double min_dist = max_distance;
 
+  // 遍历所有航点，找到欧氏距离最近的航点
   for (const auto & wp : current_map_.waypoints) {
     double dist = std::sqrt(
       std::pow(pose.position.x - wp.pose.position.x, 2) +
@@ -293,12 +307,15 @@ std::string TrafficManager::find_nearest_waypoint(
   return nearest_wp;
 }
 
-// ==================== 拓扑暴露 ====================
+// ============================================================================
+// 拓扑暴露
+// ============================================================================
 
 std::map<std::string, std::vector<std::string>> TrafficManager::get_adjacency_map() const
 {
   std::lock_guard<std::mutex> lock(mutex_);
 
+  // 构建并返回完整的邻接表
   std::map<std::string, std::vector<std::string>> adj;
   for (const auto & wp : current_map_.waypoints) {
     adj[wp.waypoint_id] = std::vector<std::string>(
@@ -307,12 +324,15 @@ std::map<std::string, std::vector<std::string>> TrafficManager::get_adjacency_ma
   return adj;
 }
 
-// ==================== 航点编辑 ====================
+// ============================================================================
+// 航点编辑
+// ============================================================================
 
 bool TrafficManager::add_waypoint(const fleet_msgs::msg::Waypoint & waypoint)
 {
   std::lock_guard<std::mutex> lock(mutex_);
 
+  // 检查航点是否已存在
   auto it = std::find_if(
     current_map_.waypoints.begin(), current_map_.waypoints.end(),
     [&waypoint](const fleet_msgs::msg::Waypoint & wp) {
@@ -347,7 +367,9 @@ bool TrafficManager::remove_waypoint(const std::string & waypoint_id)
   return false;
 }
 
-// ==================== 栅格地图 ====================
+// ============================================================================
+// 栅格地图
+// ============================================================================
 
 void TrafficManager::set_occupancy_grid(
   const nav_msgs::msg::OccupancyGrid::SharedPtr map)
@@ -356,7 +378,9 @@ void TrafficManager::set_occupancy_grid(
   occupancy_grid_ = map;
 }
 
-// ==================== 几何工具 ====================
+// ============================================================================
+// 几何工具
+// ============================================================================
 
 double TrafficManager::calculate_distance(
   const geometry_msgs::msg::Pose & p1,

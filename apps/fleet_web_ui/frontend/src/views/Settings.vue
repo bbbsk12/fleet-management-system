@@ -1,12 +1,14 @@
 <template>
   <div class="space-y-4 sm:space-y-6">
+    <!-- 页面头部：标题与操作按钮 -->
     <div class="flex items-center justify-between flex-wrap gap-2 sm:gap-4">
       <div>
         <h1 class="text-xl sm:text-2xl font-bold tracking-wide" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">{{ t('settings.title') }}</h1>
         <p class="text-xs sm:text-sm mt-0.5" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-500'">{{ t('settings.subtitle') }}</p>
       </div>
       <div class="flex gap-2">
-        <button 
+        <!-- 恢复默认设置按钮 -->
+        <button
           class="px-3 py-2 rounded-lg text-sm transition-colors flex items-center gap-2"
           :class="theme === 'dark' ? 'bg-industrial-700 border border-industrial-600 text-gray-300 hover:bg-industrial-600' : 'bg-gray-100 border border-gray-200 text-gray-700 hover:bg-gray-200'"
           @click="resetSettings"
@@ -14,7 +16,8 @@
           <RotateCcw class="w-4 h-4" />
           {{ t('settings.resetDefault') }}
         </button>
-        <button 
+        <!-- 保存设置按钮 -->
+        <button
           class="px-3 py-2 rounded-lg text-sm transition-colors flex items-center gap-2 btn-cyber"
           @click="saveSettings"
         >
@@ -24,7 +27,9 @@
       </div>
     </div>
 
+    <!-- 设置项网格布局 -->
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
+      <!-- 语言设置 -->
       <div class="data-card rounded-xl p-4 sm:p-6 neon-border">
         <h3 class="text-lg font-bold mb-4 flex items-center gap-2" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">
           <Globe class="w-5 h-5 text-cyber-blue" />
@@ -34,8 +39,8 @@
           <button
             @click="setLanguage('zh')"
             class="p-4 rounded-lg border transition-all min-h-touch"
-            :class="language === 'zh' 
-              ? 'bg-cyber-blue/20 border-cyber-blue text-cyber-blue' 
+            :class="language === 'zh'
+              ? 'bg-cyber-blue/20 border-cyber-blue text-cyber-blue'
               : (theme === 'dark' ? 'bg-industrial-700 border-industrial-600 text-gray-300 hover:border-gray-500' : 'bg-gray-50 border-gray-200 text-gray-700 hover:border-gray-300')"
           >
             <span class="text-2xl">🇨🇳</span>
@@ -44,8 +49,8 @@
           <button
             @click="setLanguage('en')"
             class="p-4 rounded-lg border transition-all min-h-touch"
-            :class="language === 'en' 
-              ? 'bg-cyber-blue/20 border-cyber-blue text-cyber-blue' 
+            :class="language === 'en'
+              ? 'bg-cyber-blue/20 border-cyber-blue text-cyber-blue'
               : (theme === 'dark' ? 'bg-industrial-700 border-industrial-600 text-gray-300 hover:border-gray-500' : 'bg-gray-50 border-gray-200 text-gray-700 hover:border-gray-300')"
           >
             <span class="text-2xl">🇺🇸</span>
@@ -54,6 +59,7 @@
         </div>
       </div>
 
+      <!-- 主题设置 -->
       <div class="data-card rounded-xl p-4 sm:p-6 neon-border">
         <h3 class="text-lg font-bold mb-4 flex items-center gap-2" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">
           <Palette class="w-5 h-5 text-cyber-purple" />
@@ -63,8 +69,8 @@
           <button
             @click="setTheme('light')"
             class="p-4 rounded-lg border transition-all flex flex-col items-center min-h-touch"
-            :class="theme === 'light' 
-              ? 'bg-cyber-blue/20 border-cyber-blue text-cyber-blue' 
+            :class="theme === 'light'
+              ? 'bg-cyber-blue/20 border-cyber-blue text-cyber-blue'
               : (theme === 'dark' ? 'bg-industrial-700 border-industrial-600 text-gray-300 hover:border-gray-500' : 'bg-gray-50 border-gray-200 text-gray-700 hover:border-gray-300')"
           >
             <Sun class="w-8 h-8 mb-2" />
@@ -73,8 +79,8 @@
           <button
             @click="setTheme('dark')"
             class="p-4 rounded-lg border transition-all flex flex-col items-center min-h-touch"
-            :class="settingsStore.theme === 'dark' 
-              ? 'bg-cyber-blue/20 border-cyber-blue text-cyber-blue' 
+            :class="settingsStore.theme === 'dark'
+              ? 'bg-cyber-blue/20 border-cyber-blue text-cyber-blue'
               : (theme === 'dark' ? 'bg-industrial-700 border-industrial-600 text-gray-300 hover:border-gray-500' : 'bg-gray-50 border-gray-200 text-gray-700 hover:border-gray-300')"
           >
             <Moon class="w-8 h-8 mb-2" />
@@ -83,6 +89,7 @@
         </div>
       </div>
 
+      <!-- 连接设置 -->
       <div class="data-card rounded-xl p-4 sm:p-6 neon-border">
         <h3 class="text-lg font-bold mb-4 flex items-center gap-2" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">
           <Network class="w-5 h-5 text-cyber-blue" />
@@ -91,46 +98,46 @@
         <div class="space-y-4">
           <div>
             <label class="block text-sm mb-2" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-600'">{{ t('settings.rosDomainId') }}</label>
-            <input 
-              type="number" 
-              v-model.number="settings.ros_domain_id" 
-              min="0" 
+            <input
+              type="number"
+              v-model.number="settings.ros_domain_id"
+              min="0"
               max="255"
               class="w-full px-4 py-2.5 rounded-lg focus:border-cyber-blue focus:outline-none transition-colors"
               :class="theme === 'dark' ? 'bg-industrial-700 border border-industrial-600 text-white' : 'bg-white border border-gray-200 text-gray-900'"
             >
             <p class="text-xs mt-1" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-500'">{{ t('settings.rosDomainIdHint') }}</p>
           </div>
-          
+
           <div>
             <label class="block text-sm mb-2" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-600'">{{ t('settings.zenohRouter') }}</label>
-            <input 
-              type="text" 
-              v-model="settings.zenoh_router" 
+            <input
+              type="text"
+              v-model="settings.zenoh_router"
               placeholder="tcp/127.0.0.1:7447"
               class="w-full px-4 py-2.5 rounded-lg focus:border-cyber-blue focus:outline-none transition-colors"
               :class="theme === 'dark' ? 'bg-industrial-700 border border-industrial-600 text-white' : 'bg-white border border-gray-200 text-gray-900'"
             >
           </div>
-          
+
           <div>
             <label class="block text-sm mb-2" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-600'">{{ t('settings.wsPort') }}</label>
-            <input 
-              type="number" 
-              v-model.number="settings.ws_port" 
-              min="1" 
+            <input
+              type="number"
+              v-model.number="settings.ws_port"
+              min="1"
               max="65535"
               class="w-full px-4 py-2.5 rounded-lg focus:border-cyber-blue focus:outline-none transition-colors"
               :class="theme === 'dark' ? 'bg-industrial-700 border border-industrial-600 text-white' : 'bg-white border border-gray-200 text-gray-900'"
             >
           </div>
-          
+
           <div>
             <label class="block text-sm mb-2" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-600'">{{ t('settings.heartbeatInterval') }}</label>
-            <input 
-              type="number" 
-              v-model.number="settings.heartbeat_interval" 
-              min="1" 
+            <input
+              type="number"
+              v-model.number="settings.heartbeat_interval"
+              min="1"
               max="60"
               class="w-full px-4 py-2.5 rounded-lg focus:border-cyber-blue focus:outline-none transition-colors"
               :class="theme === 'dark' ? 'bg-industrial-700 border border-industrial-600 text-white' : 'bg-white border border-gray-200 text-gray-900'"
@@ -138,7 +145,8 @@
           </div>
         </div>
       </div>
-      
+
+      <!-- 任务调度设置 -->
       <div class="data-card rounded-xl p-4 sm:p-6 neon-border">
         <h3 class="text-lg font-bold mb-4 flex items-center gap-2" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">
           <ListTodo class="w-5 h-5 text-cyber-purple" />
@@ -147,46 +155,46 @@
         <div class="space-y-4">
           <div>
             <label class="block text-sm mb-2" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-600'">{{ t('settings.taskTimeout') }}</label>
-            <input 
-              type="number" 
-              v-model.number="settings.task_timeout" 
-              min="30" 
+            <input
+              type="number"
+              v-model.number="settings.task_timeout"
+              min="30"
               max="3600"
               class="w-full px-4 py-2.5 rounded-lg focus:border-cyber-blue focus:outline-none transition-colors"
               :class="theme === 'dark' ? 'bg-industrial-700 border border-industrial-600 text-white' : 'bg-white border border-gray-200 text-gray-900'"
             >
           </div>
-          
+
           <div>
             <label class="block text-sm mb-2" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-600'">{{ t('settings.maxConcurrentTasks') }}</label>
-            <input 
-              type="number" 
-              v-model.number="settings.max_concurrent_tasks" 
-              min="1" 
+            <input
+              type="number"
+              v-model.number="settings.max_concurrent_tasks"
+              min="1"
               max="50"
               class="w-full px-4 py-2.5 rounded-lg focus:border-cyber-blue focus:outline-none transition-colors"
               :class="theme === 'dark' ? 'bg-industrial-700 border border-industrial-600 text-white' : 'bg-white border border-gray-200 text-gray-900'"
             >
           </div>
-          
+
           <div>
             <label class="block text-sm mb-2" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-600'">{{ t('settings.taskRetryCount') }}</label>
-            <input 
-              type="number" 
-              v-model.number="settings.task_retry_count" 
-              min="0" 
+            <input
+              type="number"
+              v-model.number="settings.task_retry_count"
+              min="0"
               max="10"
               class="w-full px-4 py-2.5 rounded-lg focus:border-cyber-blue focus:outline-none transition-colors"
               :class="theme === 'dark' ? 'bg-industrial-700 border border-industrial-600 text-white' : 'bg-white border border-gray-200 text-gray-900'"
             >
           </div>
-          
+
           <div>
             <label class="block text-sm mb-2" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-600'">{{ t('settings.lowBatteryThreshold') }}</label>
-            <input 
-              type="number" 
-              v-model.number="settings.low_battery_threshold" 
-              min="10" 
+            <input
+              type="number"
+              v-model.number="settings.low_battery_threshold"
+              min="10"
               max="50"
               class="w-full px-4 py-2.5 rounded-lg focus:border-cyber-blue focus:outline-none transition-colors"
               :class="theme === 'dark' ? 'bg-industrial-700 border border-industrial-600 text-white' : 'bg-white border border-gray-200 text-gray-900'"
@@ -195,7 +203,8 @@
           </div>
         </div>
       </div>
-      
+
+      <!-- 交通管理设置 -->
       <div class="data-card rounded-xl p-4 sm:p-6 neon-border">
         <h3 class="text-lg font-bold mb-4 flex items-center gap-2" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">
           <TrafficCone class="w-5 h-5 text-cyber-orange" />
@@ -204,50 +213,51 @@
         <div class="space-y-4">
           <div>
             <label class="block text-sm mb-2" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-600'">{{ t('settings.minSafeDistance') }}</label>
-            <input 
-              type="number" 
-              v-model.number="settings.min_safe_distance" 
-              min="0.5" 
-              max="5" 
+            <input
+              type="number"
+              v-model.number="settings.min_safe_distance"
+              min="0.5"
+              max="5"
               step="0.1"
               class="w-full px-4 py-2.5 rounded-lg focus:border-cyber-blue focus:outline-none transition-colors"
               :class="theme === 'dark' ? 'bg-industrial-700 border border-industrial-600 text-white' : 'bg-white border border-gray-200 text-gray-900'"
             >
           </div>
-          
+
           <div>
             <label class="block text-sm mb-2" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-600'">{{ t('settings.waypointLockRadius') }}</label>
-            <input 
-              type="number" 
-              v-model.number="settings.waypoint_lock_radius" 
-              min="0.3" 
-              max="2" 
+            <input
+              type="number"
+              v-model.number="settings.waypoint_lock_radius"
+              min="0.3"
+              max="2"
               step="0.1"
               class="w-full px-4 py-2.5 rounded-lg focus:border-cyber-blue focus:outline-none transition-colors"
               :class="theme === 'dark' ? 'bg-industrial-700 border border-industrial-600 text-white' : 'bg-white border border-gray-200 text-gray-900'"
             >
           </div>
-          
+
           <div>
             <label class="block text-sm mb-2" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-600'">{{ t('settings.pathPlanningTimeout') }}</label>
-            <input 
-              type="number" 
-              v-model.number="settings.path_planning_timeout" 
-              min="5" 
+            <input
+              type="number"
+              v-model.number="settings.path_planning_timeout"
+              min="5"
               max="60"
               class="w-full px-4 py-2.5 rounded-lg focus:border-cyber-blue focus:outline-none transition-colors"
               :class="theme === 'dark' ? 'bg-industrial-700 border border-industrial-600 text-white' : 'bg-white border border-gray-200 text-gray-900'"
             >
           </div>
-          
+
+          <!-- 冲突检测开关 -->
           <div class="flex items-center justify-between py-2">
             <label class="text-sm" :class="theme === 'dark' ? 'text-gray-300' : 'text-gray-700'">{{ t('settings.conflictDetection') }}</label>
-            <button 
+            <button
               class="relative w-12 h-6 rounded-full transition-colors"
               :class="settings.conflict_detection ? 'bg-cyber-blue' : (theme === 'dark' ? 'bg-industrial-600' : 'bg-gray-300')"
               @click="settings.conflict_detection = !settings.conflict_detection"
             >
-              <span 
+              <span
                 class="absolute top-1 w-4 h-4 rounded-full bg-white transition-transform"
                 :class="settings.conflict_detection ? 'left-7' : 'left-1'"
               ></span>
@@ -255,7 +265,8 @@
           </div>
         </div>
       </div>
-      
+
+      <!-- 界面设置 -->
       <div class="data-card rounded-xl p-4 sm:p-6 neon-border">
         <h3 class="text-lg font-bold mb-4 flex items-center gap-2" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">
           <Monitor class="w-5 h-5 text-cyber-pink" />
@@ -264,50 +275,52 @@
         <div class="space-y-4">
           <div>
             <label class="block text-sm mb-2" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-600'">{{ t('settings.mapRefreshRate') }}</label>
-            <input 
-              type="number" 
-              v-model.number="settings.map_refresh_rate" 
-              min="1" 
+            <input
+              type="number"
+              v-model.number="settings.map_refresh_rate"
+              min="1"
               max="30"
               class="w-full px-4 py-2.5 rounded-lg focus:border-cyber-blue focus:outline-none transition-colors"
               :class="theme === 'dark' ? 'bg-industrial-700 border border-industrial-600 text-white' : 'bg-white border border-gray-200 text-gray-900'"
             >
           </div>
-          
+
           <div>
             <label class="block text-sm mb-2" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-600'">{{ t('settings.logDisplayCount') }}</label>
-            <input 
-              type="number" 
-              v-model.number="settings.log_display_count" 
-              min="50" 
+            <input
+              type="number"
+              v-model.number="settings.log_display_count"
+              min="50"
               max="1000"
               class="w-full px-4 py-2.5 rounded-lg focus:border-cyber-blue focus:outline-none transition-colors"
               :class="theme === 'dark' ? 'bg-industrial-700 border border-industrial-600 text-white' : 'bg-white border border-gray-200 text-gray-900'"
             >
           </div>
-          
+
+          <!-- 动画开关 -->
           <div class="flex items-center justify-between py-2">
             <label class="text-sm" :class="theme === 'dark' ? 'text-gray-300' : 'text-gray-700'">{{ t('settings.enableAnimations') }}</label>
-            <button 
+            <button
               class="relative w-12 h-6 rounded-full transition-colors"
               :class="settings.enable_animations ? 'bg-cyber-blue' : (theme === 'dark' ? 'bg-industrial-600' : 'bg-gray-300')"
               @click="settings.enable_animations = !settings.enable_animations"
             >
-              <span 
+              <span
                 class="absolute top-1 w-4 h-4 rounded-full bg-white transition-transform"
                 :class="settings.enable_animations ? 'left-7' : 'left-1'"
               ></span>
             </button>
           </div>
-          
+
+          <!-- 调试信息开关 -->
           <div class="flex items-center justify-between py-2">
             <label class="text-sm" :class="theme === 'dark' ? 'text-gray-300' : 'text-gray-700'">{{ t('settings.showDebugInfo') }}</label>
-            <button 
+            <button
               class="relative w-12 h-6 rounded-full transition-colors"
               :class="settings.show_debug_info ? 'bg-cyber-blue' : (theme === 'dark' ? 'bg-industrial-600' : 'bg-gray-300')"
               @click="settings.show_debug_info = !settings.show_debug_info"
             >
-              <span 
+              <span
                 class="absolute top-1 w-4 h-4 rounded-full bg-white transition-transform"
                 :class="settings.show_debug_info ? 'left-7' : 'left-1'"
               ></span>
@@ -315,7 +328,8 @@
           </div>
         </div>
       </div>
-      
+
+      <!-- 通知设置 -->
       <div class="data-card rounded-xl p-4 sm:p-6 neon-border">
         <h3 class="text-lg font-bold mb-4 flex items-center gap-2" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">
           <Bell class="w-5 h-5 text-cyber-yellow" />
@@ -324,54 +338,54 @@
         <div class="space-y-2">
           <div class="flex items-center justify-between py-3 px-4 rounded-lg" :class="theme === 'dark' ? 'bg-industrial-700/50' : 'bg-gray-50'">
             <span class="text-sm" :class="theme === 'dark' ? 'text-gray-300' : 'text-gray-700'">{{ t('settings.taskCompleteNotify') }}</span>
-            <button 
+            <button
               class="relative w-12 h-6 rounded-full transition-colors"
               :class="settings.notify_task_complete ? 'bg-cyber-green' : (theme === 'dark' ? 'bg-industrial-600' : 'bg-gray-300')"
               @click="settings.notify_task_complete = !settings.notify_task_complete"
             >
-              <span 
+              <span
                 class="absolute top-1 w-4 h-4 rounded-full bg-white transition-transform"
                 :class="settings.notify_task_complete ? 'left-7' : 'left-1'"
               ></span>
             </button>
           </div>
-          
+
           <div class="flex items-center justify-between py-3 px-4 rounded-lg" :class="theme === 'dark' ? 'bg-industrial-700/50' : 'bg-gray-50'">
             <span class="text-sm" :class="theme === 'dark' ? 'text-gray-300' : 'text-gray-700'">{{ t('settings.lowBatteryNotify') }}</span>
-            <button 
+            <button
               class="relative w-12 h-6 rounded-full transition-colors"
               :class="settings.notify_low_battery ? 'bg-cyber-green' : (theme === 'dark' ? 'bg-industrial-600' : 'bg-gray-300')"
               @click="settings.notify_low_battery = !settings.notify_low_battery"
             >
-              <span 
+              <span
                 class="absolute top-1 w-4 h-4 rounded-full bg-white transition-transform"
                 :class="settings.notify_low_battery ? 'left-7' : 'left-1'"
               ></span>
             </button>
           </div>
-          
+
           <div class="flex items-center justify-between py-3 px-4 rounded-lg" :class="theme === 'dark' ? 'bg-industrial-700/50' : 'bg-gray-50'">
             <span class="text-sm" :class="theme === 'dark' ? 'text-gray-300' : 'text-gray-700'">{{ t('settings.offlineNotify') }}</span>
-            <button 
+            <button
               class="relative w-12 h-6 rounded-full transition-colors"
               :class="settings.notify_offline ? 'bg-cyber-green' : (theme === 'dark' ? 'bg-industrial-600' : 'bg-gray-300')"
               @click="settings.notify_offline = !settings.notify_offline"
             >
-              <span 
+              <span
                 class="absolute top-1 w-4 h-4 rounded-full bg-white transition-transform"
                 :class="settings.notify_offline ? 'left-7' : 'left-1'"
               ></span>
             </button>
           </div>
-          
+
           <div class="flex items-center justify-between py-3 px-4 rounded-lg" :class="theme === 'dark' ? 'bg-industrial-700/50' : 'bg-gray-50'">
             <span class="text-sm" :class="theme === 'dark' ? 'text-gray-300' : 'text-gray-700'">{{ t('settings.errorNotify') }}</span>
-            <button 
+            <button
               class="relative w-12 h-6 rounded-full transition-colors"
               :class="settings.notify_errors ? 'bg-cyber-green' : (theme === 'dark' ? 'bg-industrial-600' : 'bg-gray-300')"
               @click="settings.notify_errors = !settings.notify_errors"
             >
-              <span 
+              <span
                 class="absolute top-1 w-4 h-4 rounded-full bg-white transition-transform"
                 :class="settings.notify_errors ? 'left-7' : 'left-1'"
               ></span>
@@ -379,7 +393,8 @@
           </div>
         </div>
       </div>
-      
+
+      <!-- 系统信息 -->
       <div class="data-card rounded-xl p-4 sm:p-6 neon-border">
         <h3 class="text-lg font-bold mb-4 flex items-center gap-2" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">
           <Info class="w-5 h-5" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'" />
@@ -413,8 +428,8 @@ import { ref, reactive, onMounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useFleetStore } from '../stores/fleet'
 import { useSettingsStore } from '../stores/settings'
-import { 
-  RotateCcw, Save, Network, ListTodo, TrafficCone, 
+import {
+  RotateCcw, Save, Network, ListTodo, TrafficCone,
   Palette, Bell, Info, Globe, Monitor, Sun, Moon
 } from 'lucide-vue-next'
 
@@ -423,6 +438,7 @@ const settingsStore = useSettingsStore()
 const { language, theme } = storeToRefs(settingsStore)
 const { setLanguage, setTheme, t } = settingsStore
 
+// 设置项默认值
 const settings = reactive({
   ros_domain_id: 0,
   zenoh_router: 'tcp/127.0.0.1:7447',
@@ -448,8 +464,10 @@ const settings = reactive({
 
 const uptime = ref('')
 
+// 保存默认设置快照，用于恢复
 const defaultSettings = { ...settings }
 
+/** 保存设置到本地存储并同步到后端 */
 function saveSettings() {
   localStorage.setItem('fleet_settings', JSON.stringify(settings))
   fleetStore.addLog('success', t('settings.saved'))
@@ -477,6 +495,7 @@ function saveSettings() {
     })
 }
 
+/** 恢复默认设置 */
 function resetSettings() {
   if (confirm(t('settings.confirmReset'))) {
     Object.assign(settings, defaultSettings)

@@ -10,24 +10,26 @@
 namespace fleet_manager
 {
 
-// ==================== Lifecycle ====================
+// ============================================================================
+// 生命周期
+// ============================================================================
 
 FleetManagerNode::FleetManagerNode()
 : Node("fleet_manager")
 {
-  // subscriptions
+  // ── 订阅 ──
   fleet_sub_ = this->create_subscription<fleet_msgs::msg::FleetStatus>(
     "/fleet_monitor/fleet_status", 10,
     std::bind(&FleetManagerNode::fleet_status_callback, this, std::placeholders::_1));
 
-  // publishers
+  // ── 发布 ──
   traffic_pub_ = this->create_publisher<fleet_msgs::msg::FleetStatus>(
     "/fleet_manager/fleet_status_traffic", 10);
   task_pub_ = this->create_publisher<fleet_msgs::msg::TaskInfo>("~/task_status", 10);
   alert_pub_ = this->create_publisher<std_msgs::msg::String>("~/alerts", 10);
   metrics_pub_ = this->create_publisher<std_msgs::msg::String>("~/metrics", 10);
 
-  // services
+  // ── 服务 ──
   submit_srv_ = this->create_service<fleet_msgs::srv::SubmitTask>(
     "~/submit_task",
     std::bind(&FleetManagerNode::handle_submit_task, this, std::placeholders::_1, std::placeholders::_2));
@@ -47,12 +49,12 @@ FleetManagerNode::FleetManagerNode()
     "~/remove_robot",
     std::bind(&FleetManagerNode::handle_remove_robot, this, std::placeholders::_1, std::placeholders::_2));
 
-  // core modules
+  // ── 核心子模块 ──
   scheduler_  = std::make_unique<TaskScheduler>(this);
   traffic_    = std::make_unique<TrafficManager>(this);
   occupancy_  = std::make_unique<OccupancyManager>(this);
 
-  // params
+  // ── 参数声明 ──
   this->declare_parameter("traffic_map_file", "");
   this->declare_parameter("waypoint_acceptance_radius", 0.5);
   this->declare_parameter("traffic_segment_lateral_max", 1.2);
@@ -72,6 +74,7 @@ FleetManagerNode::FleetManagerNode()
   this->declare_parameter("deadlock_timeout_sec", 10.0);
   this->declare_parameter("max_task_retry_cycles", 5);
 
+  // ── 参数读取(含安全下限) ──
   waypoint_radius_  = this->get_parameter("waypoint_acceptance_radius").as_double();
   segment_lateral_  = this->get_parameter("traffic_segment_lateral_max").as_double();
   sched_interval_   = std::max(0.1, this->get_parameter("scheduler_interval_sec").as_double());
@@ -87,6 +90,7 @@ FleetManagerNode::FleetManagerNode()
   deadlock_timeout_ = std::max(5.0, this->get_parameter("deadlock_timeout_sec").as_double());
   max_task_retry_cycles_ = std::max(2, static_cast<int>(this->get_parameter("max_task_retry_cycles").as_int()));
 
+  // ── 持久化日志初始化 ──
   {
     bool en = this->get_parameter("persist_log_enabled").as_bool();
     std::string dir = this->get_parameter("persist_log_dir").as_string();
@@ -94,6 +98,7 @@ FleetManagerNode::FleetManagerNode()
     PersistLogger::init(en, dir, "fleet_manager", vb);
   }
 
+  // ── 加载交通图并注入拓扑到占用管理器 ──
   std::string map_file = this->get_parameter("traffic_map_file").as_string();
   if (!map_file.empty() && traffic_->load_map(map_file)) {
     RCLCPP_INFO(this->get_logger(), "Loaded traffic map: %s", map_file.c_str());
@@ -104,7 +109,7 @@ FleetManagerNode::FleetManagerNode()
     traffic_->validate_waypoint_spacing(waypoint_radius_ * 2.0);
   }
 
-  // timers: control (slow, 500ms) + fast (200ms)
+  // ── 定时器: 主循环 500ms + 快循环 200ms ──
   control_timer_ = this->create_wall_timer(
     std::chrono::milliseconds(500),
     std::bind(&FleetManagerNode::control_timer_callback, this));
@@ -123,22 +128,24 @@ FleetManagerNode::~FleetManagerNode()
   cancel_all_goals();
 }
 
-// ==================== Timers ====================
+// ============================================================================
+// 主循环 (500ms)
+// ============================================================================
 
 void FleetManagerNode::control_timer_callback()
 {
   std::lock_guard<std::recursive_mutex> lock(mtx_);
   ++tick_;
 
-  // expire ghost locks from offline robots
+  // 清理过期的幽灵锁
   occupancy_->expire_ghost_locks(this->now(), ghost_lock_ttl_);
 
-  // update occupancy from live robot positions
+  // 更新所有在线底盘的位置并同步 zone_locks
   for (auto & [rid, st] : robots_) {
     if (st.connection_status != "online") continue;
     if (std::abs(st.current_pose.position.x) < 1e-6 &&
         std::abs(st.current_pose.position.y) < 1e-6) {
-      // zero pose = lost localization → release locks to prevent ghost blocking
+      // 零位姿 = 定位丢失 → 释放锁防止幽灵阻塞
       occupancy_->release_locks(rid);
       occupancy_->release_reservations(rid);
       st.location_type = "unknown";
@@ -166,7 +173,7 @@ void FleetManagerNode::control_timer_callback()
   check_arrivals();
   chassis_timeout_check();
 
-  // schedule tick every sched_interval_
+  // 按 sched_interval_ 分频调度
   static int sched_phase = 0;
   int period = std::max(1, static_cast<int>(sched_interval_ / 0.5));
   if (++sched_phase >= period) {
@@ -176,7 +183,7 @@ void FleetManagerNode::control_timer_callback()
 
   deadlock_check();
 
-  // publish metrics every 5s
+  // metrics 每 5s 发布一次
   const auto now = this->now();
   if (last_metrics_time_.nanoseconds() == 0 ||
       (now - last_metrics_time_).seconds() >= 5.0) {
@@ -187,12 +194,16 @@ void FleetManagerNode::control_timer_callback()
   publish_traffic_fleet_status();
 }
 
+// ============================================================================
+// 快循环 (200ms) — LED 状态推送 + 导航重试
+// ============================================================================
+
 void FleetManagerNode::fast_timer_callback()
 {
   std::lock_guard<std::recursive_mutex> lock(mtx_);
   led_timer_callback();
 
-  // retry navigation for waiting robots
+  // 重试被阻塞的导航(退避窗口已过的机器人)
   for (auto & [rid, ni] : navs_) {
     if (!ni || ni->has_active_goal) continue;
     if (ni->current_task_id.empty()) continue;
@@ -203,7 +214,9 @@ void FleetManagerNode::fast_timer_callback()
   }
 }
 
-// ==================== Fleet Status ====================
+// ============================================================================
+// 车队状态回调 — fleet_monitor 数据到达时更新底盘集合
+// ============================================================================
 
 void FleetManagerNode::fleet_status_callback(
   const fleet_msgs::msg::FleetStatus::SharedPtr msg)
@@ -213,10 +226,12 @@ void FleetManagerNode::fleet_status_callback(
   has_fleet_ = true;
   last_fleet_time_ = this->now();
 
+  // 记录之前在线的底盘
   std::set<std::string> prev_online;
   for (const auto & [rid, st] : robots_)
     if (st.connection_status == "online") prev_online.insert(rid);
 
+  // 更新已发现底盘的状态
   std::set<std::string> reported;
   for (auto & r : msg->robots) {
     if (removed_.count(r.robot_id)) {
@@ -228,13 +243,13 @@ void FleetManagerNode::fleet_status_callback(
     get_or_create_nav(r.robot_id);
   }
 
-  // mark vanished robots offline
+  // 未在本轮上报的底盘标记为 offline
   for (auto & [rid, st] : robots_) {
     if (reported.count(rid)) continue;
     if (st.connection_status == "online") st.connection_status = "offline";
   }
 
-  // online→offline: release reservations, keep position lock (ghost guard)
+  // 在线→离线: 释放预约, 保留 zone_locks 作为幽灵守卫, 启动幽灵 TTL
   for (const auto & rid : prev_online) {
     auto it = robots_.find(rid);
     if (it != robots_.end() && it->second.connection_status != "online") {
@@ -243,15 +258,14 @@ void FleetManagerNode::fleet_status_callback(
       auto ni = get_or_create_nav(rid);
       if (ni) { cancel_goals(ni); stop_robot(rid, 10); }
 
-      // Abort active chain if offline robot is a participant
+      // 如果离线底盘是活跃链的参与者，立即中止链
       if (chain_plan_.active) {
         bool is_participant = false;
         for (const auto & s : chain_plan_.steps) {
           if (s.robot_id == rid) { is_participant = true; break; }
         }
-        if (!is_participant && chain_plan_.saved_task_ids.count(rid)) {
+        if (!is_participant && chain_plan_.saved_task_ids.count(rid))
           is_participant = true;
-        }
         if (is_participant) {
           PersistLogger::log_warn("chain.participant_offline", rid, "",
             "aborting chain due to participant offline",
@@ -261,10 +275,12 @@ void FleetManagerNode::fleet_status_callback(
       }
 
       PersistLogger::log_warn("robot.offline", rid, "",
-        "positions locked as ghost guard (TTL=" + std::to_string(ghost_lock_ttl_) + "s)", __FILE__, __LINE__, __func__);
+        "positions locked as ghost guard (TTL=" + std::to_string(ghost_lock_ttl_) + "s)",
+        __FILE__, __LINE__, __func__);
     }
   }
-  // offline→online: clear ghost locks, let update_location re-establish
+
+  // 离线→在线: 清除幽灵锁, 让 update_location 重新建立 zone_locks
   for (const auto & [rid, st] : robots_) {
     auto prev = prev_online.find(rid);
     if (prev == prev_online.end() && st.connection_status == "online") {
@@ -283,7 +299,9 @@ void FleetManagerNode::fleet_status_callback(
   }
 }
 
-// ==================== Scheduling ====================
+// ============================================================================
+// 调度主循环
+// ============================================================================
 
 void FleetManagerNode::schedule_tick()
 {
@@ -291,7 +309,7 @@ void FleetManagerNode::schedule_tick()
   occupancy_->expire_stale_reservations();
   scheduler_->purge_finished(200);
 
-  // ── comprehensive orphan recovery ──
+  // ── 孤儿任务恢复(覆盖全部执行类状态) ──
   const auto now = this->now();
   for (const auto & t : scheduler_->get_all_tasks()) {
     if (t.status != "in_progress" && t.status != "waiting_fleet" &&
@@ -306,12 +324,9 @@ void FleetManagerNode::schedule_tick()
     bool nav_bound = ni && ni->current_task_id == t.task_id;
     double age_sec = (now - t.started_at).seconds();
 
-    // ── executing: chassis timeout handles retries;
-    //     if robot offline and past all chassis deadlines, fail ──
     if (t.status == "executing") {
+      // 底盘执行中超时由 chassis_timeout_check 处理；仅离线过久才失败
       if (offline && age_sec > chassis_hs_timeout_ + chassis_exec_timeout_ + 10.0) {
-        PersistLogger::log_warn("sched.orphan_executing", rid, t.task_id,
-          "executing task on offline robot, failing", __FILE__, __LINE__, __func__);
         scheduler_->fail_task(t.task_id, "robot offline during execution");
         fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(t.task_id);
         if (!ti.task_id.empty()) task_pub_->publish(ti);
@@ -320,7 +335,6 @@ void FleetManagerNode::schedule_tick()
       continue;
     }
 
-    // ── in_progress: nav bound but idle → orphan ──
     if (t.status == "in_progress") {
       if (nav_bound && nav_idle && !ni->chassis_task_sent) {
         PersistLogger::log_warn("sched.orphan_in_progress", rid, t.task_id,
@@ -332,7 +346,6 @@ void FleetManagerNode::schedule_tick()
       continue;
     }
 
-    // ── waiting_fleet: robot offline and stale → recover ──
     if (t.status == "waiting_fleet") {
       if (offline && nav_idle && age_sec > 30.0) {
         PersistLogger::log_warn("sched.orphan_waiting", rid, t.task_id,
@@ -345,7 +358,6 @@ void FleetManagerNode::schedule_tick()
       continue;
     }
 
-    // ── assigned: nav idle for > 10s → orphan ──
     if (t.status == "assigned") {
       if (nav_bound && nav_idle && age_sec > 10.0) {
         PersistLogger::log_warn("sched.orphan_assigned", rid, t.task_id,
@@ -362,11 +374,17 @@ void FleetManagerNode::schedule_tick()
   assign_pending_tasks();
 }
 
+// ============================================================================
+// 任务分配
+// ============================================================================
+
 void FleetManagerNode::assign_pending_tasks()
 {
   std::lock_guard<std::recursive_mutex> lock(mtx_);
 
   const auto now = this->now();
+
+  // 检查 fleet_monitor 数据是否陈旧
   bool monitor_stale =
     has_fleet_ && last_fleet_time_.nanoseconds() > 0 &&
     monitor_stale_timeout_ > 0.0 &&
@@ -380,7 +398,7 @@ void FleetManagerNode::assign_pending_tasks()
 
   scheduler_->repair_queue();
 
-  // ── waiting_fleet redispatch: retry deferred tasks after backoff ──
+  // ── waiting_fleet 重调度: 退避期满的 deferred 任务恢复执行 ──
   for (const auto & t : scheduler_->get_all_tasks()) {
     if (t.status != "waiting_fleet") continue;
     if (t.assigned_robot_id.empty()) continue;
@@ -389,14 +407,11 @@ void FleetManagerNode::assign_pending_tasks()
     auto ni = get_or_create_nav(rid);
     if (!ni) continue;
 
-    // Skip if robot is already busy with another task
+    // 跳过已被其他任务占用的底盘
     if (!ni->current_task_id.empty() && ni->current_task_id != t.task_id) continue;
     if (ni->has_active_goal || !ni->route.empty() || ni->chassis_task_sent) continue;
-
-    // Check backoff
     if (ni->retry_after.nanoseconds() > 0 && now < ni->retry_after) continue;
 
-    // Check offline
     auto st = robots_.find(rid);
     if (st == robots_.end() || st->second.connection_status != "online") continue;
 
@@ -406,7 +421,7 @@ void FleetManagerNode::assign_pending_tasks()
     start_navigation(rid, t.waypoint_id, t.task_id);
   }
 
-  // build online robot list
+  // ── 构建可用底盘列表 ──
   std::vector<fleet_msgs::msg::RobotStatus> online;
   for (const auto & [rid, st] : robots_) {
     auto ni = get_or_create_nav(rid);
@@ -416,7 +431,7 @@ void FleetManagerNode::assign_pending_tasks()
     if (std::abs(st.current_pose.position.x) < 1e-6 &&
         std::abs(st.current_pose.position.y) < 1e-6) continue;
 
-    // skip busy robots (navigating or executing)
+    // 跳过被占用的底盘
     if (ni->has_active_goal || !ni->route.empty() ||
         !ni->current_task_id.empty() || ni->chassis_task_sent) continue;
 
@@ -430,10 +445,8 @@ void FleetManagerNode::assign_pending_tasks()
   auto wp_poses = traffic_->get_all_waypoint_poses();
   auto assigned = scheduler_->assign_tasks_batch(online, wp_poses);
 
-  // Bottleneck conflict check: defer tasks that would create opposite-direction
-  // traffic through the same narrow passages
+  // ── 瓶颈冲突检测: 检测对向路径冲突，defer 低优先级任务 ──
   if (assigned.size() >= 2) {
-    // Build approximate paths for each assigned task
     std::map<std::string, std::vector<std::string>> paths;
     std::map<std::string, std::set<std::pair<std::string, std::string>>> edges_used;
     for (const auto & t : assigned) {
@@ -441,7 +454,6 @@ void FleetManagerNode::assign_pending_tasks()
       auto st = robots_.find(t.assigned_robot_id);
       if (st == robots_.end()) continue;
 
-      // Find approximate start waypoint
       std::string swp = st->second.current_waypoint;
       if (swp.empty()) swp = traffic_->find_nearest_waypoint(st->second.current_pose);
       if (swp.empty()) continue;
@@ -450,14 +462,12 @@ void FleetManagerNode::assign_pending_tasks()
       if (p.size() < 2) continue;
       paths[t.task_id] = p;
 
-      // Extract directed edges
       std::set<std::pair<std::string, std::string>> edges;
       for (size_t i = 0; i + 1 < p.size(); ++i)
         edges.insert({p[i], p[i + 1]});
       edges_used[t.task_id] = std::move(edges);
     }
 
-    // Check for opposite-direction edge conflicts
     for (size_t i = 0; i < assigned.size(); ++i) {
       if (assigned[i].task_id.empty()) continue;
       auto ei = edges_used.find(assigned[i].task_id);
@@ -474,7 +484,7 @@ void FleetManagerNode::assign_pending_tasks()
         }
         if (!conflict) continue;
 
-        // Conflict found: defer lower-priority task
+        // 对向冲突: defer 低优先级的一方
         std::string defer_tid = (assigned[i].priority < assigned[j].priority) ?
           assigned[i].task_id : assigned[j].task_id;
         int defer_idx = (assigned[i].task_id == defer_tid) ?
@@ -482,34 +492,30 @@ void FleetManagerNode::assign_pending_tasks()
 
         PersistLogger::log_warn("sched.bottleneck_defer",
           assigned[defer_idx].assigned_robot_id, defer_tid,
-          "conflict with task " +
-          assigned[defer_idx == static_cast<int>(i) ? static_cast<int>(j) : static_cast<int>(i)].task_id +
-          ", deferring to serialize bottleneck passage",
+          "conflicting opposite-direction paths, deferring",
           __FILE__, __LINE__, __func__);
 
-        // Defer with preserved binding and a 5s backoff to prevent immediate redispatch
         scheduler_->mark_task_pending_preserve(defer_tid);
         auto defer_ni = get_or_create_nav(assigned[defer_idx].assigned_robot_id);
         if (defer_ni) {
-          defer_ni->retry_after = this->now() + rclcpp::Duration::from_seconds(5.0);
+          defer_ni->retry_after = now + rclcpp::Duration::from_seconds(5.0);
         }
         fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(defer_tid);
         if (!ti.task_id.empty()) task_pub_->publish(ti);
-        assigned[defer_idx].task_id.clear();  // mark as handled
+        assigned[defer_idx].task_id.clear();
       }
     }
   }
 
+  // ── 启动导航 ──
   for (auto & t : assigned) {
     if (t.task_id.empty()) continue;
 
-    // safety check: robot must be truly idle
     auto ni = get_or_create_nav(t.assigned_robot_id);
     if (ni && (ni->has_active_goal || !ni->route.empty() ||
                !ni->current_task_id.empty() || ni->chassis_task_sent)) {
-      // Defer with backoff instead of immediate re-queue to avoid busy loop
       scheduler_->mark_task_waiting(t.task_id);
-      ni->retry_after = this->now() + rclcpp::Duration::from_seconds(3.0);
+      ni->retry_after = now + rclcpp::Duration::from_seconds(3.0);
       fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(t.task_id);
       if (!ti.task_id.empty()) task_pub_->publish(ti);
       continue;
@@ -521,20 +527,19 @@ void FleetManagerNode::assign_pending_tasks()
   }
 }
 
-// ==================== Deadlock Detection ====================
+// ============================================================================
+// 死锁检测
+// ============================================================================
 
 void FleetManagerNode::deadlock_check()
 {
   std::lock_guard<std::recursive_mutex> lock(mtx_);
   const auto now = this->now();
 
-  // Build blocking graph: robot → robot that blocks its next waypoint
-  // Include BOTH robots with active Nav2 goals AND robots blocked at waypoints
-  // (has_active_goal=false but route non-empty, waiting for next hop to clear)
+  // 构建阻塞图: 包含活跃导航和航点阻塞的底盘
   std::map<std::string, std::string> block_graph;
   for (auto & [rid, ni] : navs_) {
     if (!ni || ni->route.empty() || ni->route_index >= ni->route.size()) continue;
-    // Must have an active task (not just stale route)
     if (ni->current_task_id.empty()) continue;
 
     std::string next_wp = ni->route[ni->route_index];
@@ -544,7 +549,7 @@ void FleetManagerNode::deadlock_check()
     }
   }
 
-  // DFS cycle detection
+  // DFS 环检测
   std::vector<std::string> cycle;
   for (const auto & [rid, _] : block_graph) {
     std::map<std::string, size_t> seen;
@@ -570,7 +575,7 @@ void FleetManagerNode::deadlock_check()
     return;
   }
 
-  // Build stable key for this cycle (sort to normalize rotation)
+  // 生成排序后的环特征 key(旋转无关)
   std::string cycle_key;
   {
     std::vector<std::string> sorted = cycle;
@@ -589,14 +594,13 @@ void FleetManagerNode::deadlock_check()
   double duration = (now - cycle_first_seen_).seconds();
   if (duration < deadlock_timeout_) return;
 
-  // Break the deadlock
+  // 打破死锁
   deadlock_break_count_++;
   PersistLogger::log_warn("deadlock.break", "", "",
-    "deadlock persisted for " + std::to_string(duration) + "s, breaking circle of " +
-    std::to_string(cycle.size()) + " robots",
+    "deadlock persisted for " + std::to_string(duration) + "s, breaking",
     __FILE__, __LINE__, __func__);
 
-  // Choose the victim: robot with lowest priority task
+  // 选最低优先级任务的底盘作为 victim
   std::string victim;
   int victim_pri = std::numeric_limits<int>::max();
   for (const auto & rid : cycle) {
@@ -624,8 +628,7 @@ void FleetManagerNode::deadlock_check()
   ni->second->retry_count = 0;
   stop_robot(victim, 5);
 
-  // Physically relocate victim away from the deadlock waypoint
-  // to actually clear the bottleneck for other robots in the cycle
+  // 物理移走 victim: 释放 zone_locks 并导航到最近空闲航点
   auto st = robots_.find(victim);
   if (st != robots_.end()) {
     std::string cur_wp = st->second.current_waypoint;
@@ -642,10 +645,8 @@ void FleetManagerNode::deadlock_check()
         ni->second->current_task_id = "relocate_" + victim;
         ni->second->retry_count = 0;
         ni->second->retry_after = rclcpp::Time{};
-        // Release the victim's current zone lock so others can pass
         occupancy_->release_locks(victim);
         navigate_to_waypoint(victim, relocate_wp, ni->second->current_task_id, true);
-        // Note: task is still preserved — will be assigned after relocate completes
       }
     }
   }
@@ -660,7 +661,9 @@ void FleetManagerNode::deadlock_check()
   cycle_first_seen_ = rclcpp::Time{};
 }
 
-// ==================== Metrics ====================
+// ============================================================================
+// 运营指标
+// ============================================================================
 
 void FleetManagerNode::publish_metrics()
 {

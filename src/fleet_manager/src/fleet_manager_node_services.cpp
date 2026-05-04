@@ -4,7 +4,9 @@
 namespace fleet_manager
 {
 
-// ==================== Services ====================
+// ============================================================================
+// ROS2 服务实现
+// ============================================================================
 
 void FleetManagerNode::handle_submit_task(
   const std::shared_ptr<fleet_msgs::srv::SubmitTask::Request> req,
@@ -34,7 +36,7 @@ void FleetManagerNode::handle_cancel_task(
   fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(req->task_id);
   task_pub_->publish(ti);
 
-  // stop robot if it's executing this task
+  // 停掉正在执行此任务的所有底盘并清理导航状态
   for (auto & [rid, ni] : navs_) {
     if (!ni || ni->current_task_id != req->task_id) continue;
     cancel_goals(ni);
@@ -75,6 +77,7 @@ void FleetManagerNode::handle_load_traffic_map(
   res->success = traffic_->load_map(req->file_path);
   res->message = res->success ? "loaded" : "failed";
   if (res->success) {
+    // 重新注入拓扑到占用管理器
     occupancy_->set_topology(
       traffic_->get_adjacency_map(),
       [this](const std::string & id) { return traffic_->get_waypoint_pose(id); },
@@ -100,7 +103,7 @@ void FleetManagerNode::handle_remove_robot(
   const std::string & rid = req->robot_id;
   if (rid.empty()) { res->success = false; res->message = "empty id"; return; }
 
-  // cancel all tasks
+  // 将与该底盘关联的所有非终态任务标记为失败
   for (const auto & t : scheduler_->get_all_tasks()) {
     if (t.assigned_robot_id == rid && t.status != "completed" &&
         t.status != "failed" && t.status != "cancelled") {
@@ -120,11 +123,12 @@ void FleetManagerNode::handle_remove_robot(
     ni->chassis_handshake_ok = false;
   }
 
+  // 彻底清除底盘的占用状态、注册信息和导航状态
   occupancy_->clear_robot(rid);
   robots_.erase(rid);
   navs_.erase(rid);
   stop_robot(rid, 5);
-  removed_.insert(rid);
+  removed_.insert(rid);  // 加入黑名单，防止 fleet_monitor 重复发现
 
   PersistLogger::log_warn("robot.removed", rid, "",
     "removed from fleet", __FILE__, __LINE__, __func__);
@@ -132,6 +136,10 @@ void FleetManagerNode::handle_remove_robot(
   res->success = true;
   res->message = "removed";
 }
+
+// ============================================================================
+// 车队状态发布
+// ============================================================================
 
 void FleetManagerNode::publish_traffic_fleet_status()
 {
@@ -144,10 +152,10 @@ void FleetManagerNode::publish_traffic_fleet_status()
   out.active_tasks = last_fleet_.active_tasks;
   out.system_status = last_fleet_.system_status;
 
+  // 注入交通管制信息: nav_status / planned_route / current_task_id
   for (auto & [id, st] : robots_) {
     if (is_robot_executing(id)) st.nav_status = "executing";
 
-    // update planned route from nav state
     auto ni = navs_.find(id);
     if (ni != navs_.end() && ni->second) {
       st.planned_route = ni->second->route;

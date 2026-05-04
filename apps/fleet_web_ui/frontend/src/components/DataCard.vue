@@ -1,4 +1,5 @@
 <template>
+  <!-- 通用数据展示卡片：支持点击交互与多种颜色主题 -->
   <component
     :is="onClick ? 'button' : 'div'"
     @click="onClick"
@@ -6,6 +7,7 @@
     :class="{ 'cursor-pointer': onClick }"
     :style="{ minHeight: '44px' }"
   >
+    <!-- 卡片头部：标题与图标 -->
     <div class="flex items-start justify-between mb-2 sm:mb-3">
       <span class="text-xs sm:text-sm uppercase tracking-wider font-medium" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">
         {{ title }}
@@ -14,7 +16,8 @@
         <component :is="icon" class="w-5 h-5 sm:w-6 sm:h-6" />
       </span>
     </div>
-    
+
+    <!-- 卡片主体：数值、单位与趋势指示 -->
     <div class="flex items-baseline gap-1 sm:gap-2">
       <span :class="['text-xl sm:text-2xl md:text-3xl font-bold', colorClasses[color].text]">
         {{ value }}
@@ -33,19 +36,21 @@
 import { storeToRefs } from 'pinia'
 import { useSettingsStore } from '../stores/settings'
 
+// 组件属性定义
 const props = defineProps({
-  title: { type: String, required: true },
-  value: { type: [String, Number], required: true },
-  unit: { type: String, default: '' },
-  icon: { type: Object, default: null },
-  trend: { type: String, default: '' },
-  color: { type: String, default: 'blue' },
-  onClick: { type: Function, default: null }
+  title: { type: String, required: true },       // 卡片标题
+  value: { type: [String, Number], required: true }, // 显示数值
+  unit: { type: String, default: '' },            // 单位
+  icon: { type: Object, default: null },          // 图标组件
+  trend: { type: String, default: '' },           // 趋势方向（up/down/stable）
+  color: { type: String, default: 'blue' },       // 主题色
+  onClick: { type: Function, default: null }      // 点击回调
 })
 
 const settingsStore = useSettingsStore()
 const { theme } = storeToRefs(settingsStore)
 
+// 颜色方案映射表
 const colorClasses = {
   blue: { text: 'text-cyber-blue' },
   green: { text: 'text-cyber-green' },
@@ -55,6 +60,7 @@ const colorClasses = {
   yellow: { text: 'text-cyber-yellow' }
 }
 
+// 趋势颜色与标签映射
 const trendColors = {
   up: 'text-cyber-green',
   down: 'text-cyber-red',
@@ -62,8 +68,8 @@ const trendColors = {
 }
 
 const trendLabels = {
-  up: '↑',
-  down: '↓',
-  stable: '→'
+  up: '\u2191',
+  down: '\u2193',
+  stable: '\u2192'
 }
 </script>

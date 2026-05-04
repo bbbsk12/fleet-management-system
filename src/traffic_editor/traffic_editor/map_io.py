@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+交通图文件读写模块。
+
+提供交通图数据与 YAML 文件之间的序列化与反序列化功能，
+包括航点数据、连接关系以及地图元信息的导出与导入。
+"""
+
 import os
 from typing import Dict, List, Tuple
 
@@ -15,6 +22,18 @@ def dump_traffic_map(
     map_image_file: str = "",
     map_yaml_meta: dict | None = None,
 ) -> None:
+    """将交通图数据导出到 YAML 文件。
+
+    将当前编辑器中的航点数据、连接关系及地图关联信息
+    序列化并写入指定路径的 YAML 文件，供后续加载使用。
+
+    Args:
+        file_path: 目标 YAML 文件路径。
+        waypoints: 航点数据字典，键为航点 ID，值为航点属性字典。
+        map_yaml_path: 地图 YAML 文件路径（可选），用于关联底图。
+        map_image_file: 地图图片文件名（可选）。
+        map_yaml_meta: 地图元信息字典（可选），包含分辨率与原点坐标。
+    """
     resolved_map_yaml_path = map_yaml_path
     if resolved_map_yaml_path:
         target_dir = os.path.dirname(os.path.abspath(file_path))
@@ -65,6 +84,20 @@ def dump_traffic_map(
 
 
 def load_traffic_map(file_path: str) -> Tuple[Dict[str, dict], List[Tuple[str, str]], int]:
+    """从 YAML 文件加载交通图数据。
+
+    从指定 YAML 文件中读取并解析交通图数据，还原航点位置、
+    属性及连接关系，并自动确保无向图连接的对称一致性。
+
+    Args:
+        file_path: YAML 文件路径。
+
+    Returns:
+        包含三个元素的元组：
+            - 航点数据字典
+            - 连接关系列表（每项为 (起点ID, 终点ID) 二元组）
+            - 当前最大航点编号
+    """
     with open(file_path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
 
@@ -98,7 +131,11 @@ def load_traffic_map(file_path: str) -> Tuple[Dict[str, dict], List[Tuple[str, s
             if edge not in connections:
                 connections.append(edge)
 
-    # Ensure undirected consistency.
+    # -----------------------------------------------------------------------
+    # 无向图连接一致性修正
+    # -----------------------------------------------------------------------
+    # 若航点 A 的连接列表包含 B 但 B 的连接列表中不包含 A，
+    # 则自动将 A 添加至 B 的连接列表，以确保无向边的对称性。
     for a_id, a_data in waypoints.items():
         for b_id in list(a_data.get("connections", []) or []):
             if b_id not in waypoints:
@@ -108,6 +145,7 @@ def load_traffic_map(file_path: str) -> Tuple[Dict[str, dict], List[Tuple[str, s
                 b_conns.append(a_id)
                 waypoints[b_id]["connections"] = b_conns
 
+    # 根据修正后的航点数据重新生成无重复的连接关系列表
     connections = []
     for a_id, a_data in waypoints.items():
         for b_id in a_data.get("connections", []) or []:

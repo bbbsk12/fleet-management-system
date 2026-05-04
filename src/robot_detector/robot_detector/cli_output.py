@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Output utilities for robot detector CLI."""
+"""
+CLI 输出工具模块。
+
+提供机器人检测结果的格式化输出功能，
+包括控制台表格展示、JSON 序列化及 zenohd 状态检查。
+"""
 
 import json
 import subprocess
@@ -13,6 +18,13 @@ except ImportError:
 
 
 def check_zenohd_running() -> bool:
+    """检查 zenohd 进程是否正在运行。
+
+    通过 pgrep 命令匹配 zenohd 进程名来判断。
+
+    返回:
+        如果 zenohd 正在运行则返回 True，否则返回 False。
+    """
     try:
         result = subprocess.run(
             ["pgrep", "-f", "zenohd"],
@@ -25,6 +37,13 @@ def check_zenohd_running() -> bool:
 
 
 def print_results(robots: Dict[str, RobotInfo], zenoh_router: str) -> None:
+    """在控制台打印格式化的机器人检测结果。
+
+    参数:
+        robots: 命名空间到机器人信息对象的映射字典。
+        zenoh_router: 使用的 Zenoh 路由器地址。
+    """
+    # ---- 检测概要信息 ----
     print()
     print("=" * 60)
     print("检测结果")
@@ -35,6 +54,7 @@ def print_results(robots: Dict[str, RobotInfo], zenoh_router: str) -> None:
     print("zenohd状态: ✅ 运行中" if check_zenohd_running() else "zenohd状态: ❌ 未运行")
     print()
 
+    # ---- 未检测到机器人的处理 ----
     if not robots:
         print("❌ 未检测到任何机器人底盘!")
         print()
@@ -61,6 +81,7 @@ connect: { endpoints: ["tcp/<总控IP>:7447"] }
         )
         return
 
+    # ---- 检测到的机器人列表 ----
     print(f"✅ 检测到 {len(robots)} 个机器人底盘")
     print("=" * 60)
 
@@ -73,6 +94,7 @@ connect: { endpoints: ["tcp/<总控IP>:7447"] }
         print(f"  连接评分: {robot.connection_score}/9")
         print()
 
+        # 话题状态
         print("  话题状态:")
         print(f"    {'✅' if robot.has_odom else '❌'} /odom (里程计)")
         print(f"    {'✅' if robot.has_tf else '❌'} /tf (坐标变换)")
@@ -86,9 +108,11 @@ connect: { endpoints: ["tcp/<总控IP>:7447"] }
         print(f"    {'✅' if robot.has_map else '❌'} /map (地图)")
         print()
 
+        # 导航能力
         print("  导航能力:")
         print(f"    {'✅' if robot.has_nav2 else '❌'} Nav2 导航")
 
+        # 发布者话题列表
         if robot.publishers:
             print()
             print(f"  发布者话题 ({len(robot.publishers)}):")
@@ -97,6 +121,7 @@ connect: { endpoints: ["tcp/<总控IP>:7447"] }
             if len(robot.publishers) > 5:
                 print(f"    ... 还有 {len(robot.publishers) - 5} 个")
 
+        # 订阅者话题列表
         if robot.subscribers:
             print()
             print(f"  订阅者话题 ({len(robot.subscribers)}):")
@@ -105,6 +130,7 @@ connect: { endpoints: ["tcp/<总控IP>:7447"] }
             if len(robot.subscribers) > 5:
                 print(f"    ... 还有 {len(robot.subscribers) - 5} 个")
 
+        # 发布话题列表
         if robot.topics:
             print()
             print(f"  发布话题 ({len(robot.topics)}):")
@@ -113,6 +139,7 @@ connect: { endpoints: ["tcp/<总控IP>:7447"] }
             if len(robot.topics) > 5:
                 print(f"    ... 还有 {len(robot.topics) - 5} 个")
 
+        # Action 列表
         if robot.actions:
             print()
             print(f"  Actions ({len(robot.actions)}):")
@@ -124,6 +151,15 @@ connect: { endpoints: ["tcp/<总控IP>:7447"] }
 
 
 def to_json_payload(robots: Dict[str, RobotInfo], router: str) -> dict:
+    """将检测结果转换为 JSON 序列化友好的字典结构。
+
+    参数:
+        robots: 命名空间到机器人信息对象的映射字典。
+        router: Zenoh 路由器地址。
+
+    返回:
+        包含时间戳、路由器地址和机器人列表的字典。
+    """
     return {
         "timestamp": time.time(),
         "router": router,
@@ -147,4 +183,10 @@ def to_json_payload(robots: Dict[str, RobotInfo], router: str) -> dict:
 
 
 def print_json_payload(robots: Dict[str, RobotInfo], router: str) -> None:
+    """以 JSON 格式打印检测结果到标准输出。
+
+    参数:
+        robots: 命名空间到机器人信息对象的映射字典。
+        router: Zenoh 路由器地址。
+    """
     print(json.dumps(to_json_payload(robots, router), indent=2, ensure_ascii=False))

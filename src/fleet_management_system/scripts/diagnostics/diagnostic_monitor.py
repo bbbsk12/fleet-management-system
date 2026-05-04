@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Fleet Management System 诊断监控工具
-=============================================
-通过 Web API 轮询车队状态、提交任务、检查调度规则冲突。
-所有输出均写入 logs/diagnostics/ 目录，不输出到终端。
+车队管理系统诊断监控工具
+=========================
 
-用法:
+功能说明：
+  通过 Web API 轮询车队状态、提交任务、检查调度规则冲突。
+  所有输出均写入 logs/diagnostics/ 目录，不输出到终端。
+
+使用示例：
+
   # 仅监控（持续轮询 + 规则检查）
   python3 scripts/diagnostics/diagnostic_monitor.py --mode monitor
 
@@ -33,18 +36,19 @@ if str(SCRIPTS_ROOT) not in sys.path:
 from _lib.http_api import http_json
 from _lib.traffic_rules import check_traffic_rule_violations
 
-# ======================== 配置 ========================
+# ======================== 全局配置 ========================
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 WORKSPACE_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 LOG_DIR = os.path.join(WORKSPACE_ROOT, "logs", "diagnostics")
 BASE_URL = os.environ.get("FLEET_API_BASE", "http://127.0.0.1:8080")
-POLL_INTERVAL = 0.5  # 秒
+POLL_INTERVAL = 0.5  # 轮询间隔（秒）
 
 
-# ======================== 日志 ========================
+# ======================== 日志记录 ========================
 
 class FileLogger:
+    """文件日志记录器，负责将诊断信息写入日志文件并生成摘要报告。"""
     def __init__(self):
         os.makedirs(LOG_DIR, exist_ok=True)
         now = datetime.now()
@@ -58,20 +62,24 @@ class FileLogger:
         self.events = []
 
     def log(self, level: str, msg: str):
+        """记录一条带时间戳和级别的日志条目。"""
         ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         line = f"[{ts}] [{level:5s}] {msg}"
         self._fh.write(line + "\n")
         self._fh.flush()
 
     def violation(self, msg: str):
+        """记录一条违规事件。"""
         self.log("VIOLN", msg)
         self.violations.append((datetime.now().isoformat(), msg))
 
     def event(self, msg: str):
+        """记录一条普通事件。"""
         self.log("EVENT", msg)
         self.events.append((datetime.now().isoformat(), msg))
 
     def write_summary(self):
+        """将违规和事件汇总写入摘要文件。"""
         with open(self.summary_path, "w", encoding="utf-8") as f:
             f.write("=" * 60 + "\n")
             f.write("Fleet Diagnostic Summary\n")
@@ -91,13 +99,15 @@ class FileLogger:
         self.log("INFO", f"Summary written to {self.summary_path}")
 
     def close(self):
+        """关闭日志文件并写入摘要。"""
         self.write_summary()
         self._fh.close()
 
 
-# ======================== HTTP helpers ========================
+# ======================== HTTP 请求辅助函数 ========================
 
 def api_get(path: str):
+    """发送 GET 请求，失败时返回包含 _error 字段的字典。"""
     try:
         return http_json(f"{BASE_URL}{path}", method="GET", timeout=5.0)
     except Exception as e:
@@ -105,6 +115,7 @@ def api_get(path: str):
 
 
 def api_post(path: str, data: dict):
+    """发送 POST 请求，失败时返回包含 _error 字段的字典。"""
     try:
         return http_json(f"{BASE_URL}{path}", method="POST", body=data, timeout=15.0)
     except Exception as e:
@@ -112,6 +123,7 @@ def api_post(path: str, data: dict):
 
 
 def api_delete(path: str):
+    """发送 DELETE 请求，失败时返回包含 _error 字段的字典。"""
     try:
         return http_json(f"{BASE_URL}{path}", method="DELETE", timeout=10.0)
     except Exception as e:
@@ -121,15 +133,17 @@ def api_delete(path: str):
 # ======================== 状态快照 ========================
 
 class FleetSnapshot:
-    """一次轮询的快照"""
+    """单次轮询获取的车队状态快照。"""
+
     def __init__(self, robots: dict, tasks: dict, waypoints: list):
-        self.robots = robots          # {id: {...}}
-        self.tasks = tasks            # {id: {...}}
-        self.waypoints = waypoints    # [{id, ...}]
+        self.robots = robots          # 机器人字典 {id: {...}}
+        self.tasks = tasks            # 任务字典 {id: {...}}
+        self.waypoints = waypoints    # 航点列表 [{id, ...}]
         self.ts = time.time()
 
     @staticmethod
     def fetch(logger: FileLogger):
+        """从 API 获取当前车队状态快照。"""
         r = api_get("/api/robots")
         t = api_get("/api/tasks")
         w = api_get("/api/map/waypoints")
@@ -141,10 +155,10 @@ class FleetSnapshot:
         return FleetSnapshot(robots, tasks, waypoints)
 
 
-# ======================== 规则检查 ========================
+# ======================== 调度规则检查 ========================
 
 def check_rules(snap: FleetSnapshot, logger: FileLogger):
-    """对当前快照执行调度规则检查"""
+    """对当前快照执行调度规则检查，记录发现的违规。"""
     robots = snap.robots
     if not robots:
         return
@@ -153,7 +167,7 @@ def check_rules(snap: FleetSnapshot, logger: FileLogger):
 
 
 def log_fleet_state(snap: FleetSnapshot, logger: FileLogger):
-    """记录一行精简的全局状态"""
+    """记录一行精简的全局状态摘要，包含各机器人位置和任务统计。"""
     parts = []
     for rid in sorted(snap.robots.keys()):
         r = snap.robots[rid]
@@ -175,7 +189,7 @@ def log_fleet_state(snap: FleetSnapshot, logger: FileLogger):
 
     logger.log("STATE", " | ".join(parts) if parts else "(no robots)")
 
-    # 任务统计
+    # 任务状态统计
     task_counts = defaultdict(int)
     for t in snap.tasks.values():
         task_counts[t.get("status", "?")] += 1
@@ -183,9 +197,10 @@ def log_fleet_state(snap: FleetSnapshot, logger: FileLogger):
         logger.log("TASKS", " ".join(f"{k}={v}" for k, v in sorted(task_counts.items())))
 
 
-# ======================== 模式：监控 ========================
+# ======================== 监控模式 ========================
 
 def run_monitor(logger: FileLogger, duration: float = 120.0):
+    """持续轮询模式：按固定间隔获取状态快照，执行规则检查和状态变化检测。"""
     logger.log("INFO", f"=== Monitor mode (duration={duration}s, poll={POLL_INTERVAL}s) ===")
     start = time.time()
     prev_snap = None
@@ -193,19 +208,18 @@ def run_monitor(logger: FileLogger, duration: float = 120.0):
     while time.time() - start < duration:
         snap = FleetSnapshot.fetch(logger)
 
-        # 每 2 秒记录完整状态
+        # 每 2 秒记录一次完整状态
         if tick % max(1, int(2.0 / POLL_INTERVAL)) == 0:
             log_fleet_state(snap, logger)
 
         check_rules(snap, logger)
 
-        # 检测任务状态变化
+        # 检测任务状态变化和机器人位置跳变
         if prev_snap:
             for tid, t in snap.tasks.items():
                 old = prev_snap.tasks.get(tid, {})
                 if t.get("status") != old.get("status"):
                     logger.event(f"Task {tid}: {old.get('status', 'new')} -> {t['status']}")
-            # 检测机器人位置跳变（调试有用）
             for rid in snap.robots:
                 r = snap.robots[rid]
                 old_r = prev_snap.robots.get(rid, {})
@@ -221,13 +235,13 @@ def run_monitor(logger: FileLogger, duration: float = 120.0):
     logger.log("INFO", "Monitor finished")
 
 
-# ======================== 模式：测试 ========================
+# ======================== 测试模式 ========================
 
 def run_test(logger: FileLogger):
-    """提交一系列任务并持续监控调度行为"""
+    """测试模式：提交一系列预设任务并持续监控调度行为，验证系统在不同压力场景下的表现。"""
     logger.log("INFO", "=== Test mode ===")
 
-    # 先获取初始状态
+    # 获取初始状态
     snap = FleetSnapshot.fetch(logger)
     log_fleet_state(snap, logger)
 
@@ -240,9 +254,8 @@ def run_test(logger: FileLogger):
     waypoint_ids = [w["id"] for w in snap.waypoints]
     logger.log("INFO", f"Waypoints: {waypoint_ids}")
 
-    # ----- 测试 1: 给每个机器人一个不同的目标航点 -----
+    # ----- 测试 1：为每个机器人分配不同的目标航点 -----
     logger.log("INFO", "--- Test 1: Send each robot to a different destination ---")
-    # 选择不在机器人当前位置的航点
     targets = []
     used_wps = set()
     for rid in robot_ids:
@@ -269,9 +282,9 @@ def run_test(logger: FileLogger):
     logger.log("INFO", "Monitoring task execution for 90 seconds...")
     run_monitor(logger, duration=90.0)
 
-    # ----- 测试 2: 同时提交多个任务到同一航点 -----
+    # ----- 测试 2：多任务提交到同一航点（自动分配测试）-----
     logger.log("INFO", "--- Test 2: Submit tasks to same waypoint (auto assign) ---")
-    target_wp = "wp_001"  # 选一个中间节点
+    target_wp = "wp_001"
     for i in range(2):
         result = api_post("/api/tasks", {
             "waypoint_id": target_wp,
@@ -284,13 +297,13 @@ def run_test(logger: FileLogger):
 
     run_monitor(logger, duration=90.0)
 
-    # ----- 测试 3: 对向通行测试（潜在冲突） -----
+    # ----- 测试 3：对向通行测试（潜在冲突场景）-----
     logger.log("INFO", "--- Test 3: Opposite direction tasks (conflict potential) ---")
     snap2 = FleetSnapshot.fetch(logger)
     if len(robot_ids) >= 2:
         r0_wp = snap2.robots.get(robot_ids[0], {}).get("current_waypoint", "")
         r1_wp = snap2.robots.get(robot_ids[1], {}).get("current_waypoint", "")
-        # 让他们去对方的位置
+        # 让它们互相前往对方当前位置
         if r0_wp and r1_wp and r0_wp != r1_wp:
             result0 = api_post("/api/tasks", {
                 "waypoint_id": r1_wp, "priority": 0, "robot_id": robot_ids[0]
@@ -300,7 +313,7 @@ def run_test(logger: FileLogger):
             })
             logger.event(f"Opposite: {robot_ids[0]}->{r1_wp}, {robot_ids[1]}->{r0_wp}")
         else:
-            # 用固定航点
+            # 使用固定航点作为后备方案
             result0 = api_post("/api/tasks", {
                 "waypoint_id": "wp_006", "priority": 0, "robot_id": robot_ids[0]
             })
@@ -314,21 +327,22 @@ def run_test(logger: FileLogger):
     logger.log("INFO", "=== Test complete ===")
 
 
-# ======================== 模式：单任务提交 ========================
+# ======================== 单任务提交模式 ========================
 
 def run_submit(logger: FileLogger, waypoint: str, robot_id: str = ""):
+    """提交单个任务到指定航点，随后监控 60 秒。"""
     payload = {"waypoint_id": waypoint, "priority": 0}
     if robot_id:
         payload["robot_id"] = robot_id
     result = api_post("/api/tasks", payload)
     logger.log("INFO", f"Submit result: {json.dumps(result, ensure_ascii=False)}")
-    # 监控 60 秒
     run_monitor(logger, duration=60.0)
 
 
-# ======================== 入口 ========================
+# ======================== 程序入口 ========================
 
 def main():
+    """主函数：解析命令行参数并启动相应模式。"""
     global BASE_URL
     parser = argparse.ArgumentParser(description="Fleet Diagnostic Monitor")
     parser.add_argument("--mode", choices=["monitor", "test", "submit"],
@@ -362,7 +376,7 @@ def main():
         logger.log("ERROR", f"Unhandled: {e}")
     finally:
         logger.close()
-        # Print summary path to stderr for the user
+        # 将日志路径输出到 stderr 供用户参考
         print(f"Logs: {logger.path}", file=sys.stderr)
         print(f"Summary: {logger.summary_path}", file=sys.stderr)
         if logger.violations:

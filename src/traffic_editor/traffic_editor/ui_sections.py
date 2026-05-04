@@ -1,11 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+UI 分区组件模块。
+
+提供主界面中各 UI 分区的构建函数，包括标题栏区域和航点管理卡片区域，
+用于组合主窗口的顶部标题栏与右侧控制面板。
+"""
+
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QFrame, QLabel, QHBoxLayout
 
 
 def create_title_section(window, layout) -> None:
+    """构建顶部标题栏区域。
+
+    创建包含应用标题和 ROS 在线状态指示器的标题栏，
+    并在下方添加渐变分隔线。
+
+    Args:
+        window: 主窗口实例，用于绑定 status_indicator 属性。
+        layout: 父级布局，标题栏将被添加至此布局中。
+    """
     title_frame = QFrame()
     title_layout = QHBoxLayout(title_frame)
     title_layout.setContentsMargins(0, 0, 0, 10)
@@ -29,6 +45,17 @@ def create_title_section(window, layout) -> None:
 
 
 def create_waypoint_card(window, layout, modern_card_cls, modern_button_cls) -> None:
+    """构建航点管理卡片。
+
+    创建包含航点/航线统计、交互模式切换按钮和清空操作按钮的
+    航点管理卡片，用于右侧控制面板。
+
+    Args:
+        window: 主窗口实例，用于绑定统计标签和模式标签属性。
+        layout: 父级布局，航点管理卡片将被添加至此布局中。
+        modern_card_cls: 现代化卡片组件类。
+        modern_button_cls: 现代化按钮组件类。
+    """
     card = modern_card_cls("航点管理")
     card_layout = card.layout()
 
