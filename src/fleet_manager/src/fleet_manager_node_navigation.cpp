@@ -9,6 +9,18 @@
 namespace fleet_manager
 {
 
+// ==================== Chain Retreat Constants ====================
+
+namespace
+{
+constexpr int    kMaxChainDepth = 5;
+constexpr double kChainTotalTimeout = 180.0;  // more headroom for deep chains
+constexpr double kChainStepTimeout = 30.0;
+constexpr int    kMaxChainStepRetries = 2;
+constexpr int    kMinDepthForParallelRetreat = 3;  // deep chains get parallel leaf steps
+constexpr const char * kChainTaskPrefix = "chain_retreat_";
+}  // namespace
+
 // ==================== Navigation Entry ====================
 
 bool FleetManagerNode::start_navigation(
@@ -128,7 +140,9 @@ bool FleetManagerNode::start_navigation(
 
       // retry with backoff
       ni->retry_count++;
-      double backoff = retry_base_ * std::pow(1.5, std::min(ni->retry_count, retry_max_));
+      // Per-robot jitter: prevents simultaneous retry of multiple blocked robots
+double jitter = 0.7 + 0.6 * (static_cast<double>(std::hash<std::string>{}(robot_id) % 1000) / 1000.0);
+double backoff = jitter * retry_base_ * std::pow(1.5, std::min(ni->retry_count, retry_max_));
       ni->retry_after = now + rclcpp::Duration::from_seconds(backoff);
       scheduler_->mark_task_waiting(task_id);
       return false;
@@ -139,7 +153,9 @@ bool FleetManagerNode::start_navigation(
   if (path.size() >= 2) {
     if (!occupancy_->reserve_next(robot_id, path[0], path[1])) {
       ni->retry_count++;
-      double backoff = retry_base_ * std::pow(1.5, std::min(ni->retry_count, retry_max_));
+      // Per-robot jitter: prevents simultaneous retry of multiple blocked robots
+double jitter = 0.7 + 0.6 * (static_cast<double>(std::hash<std::string>{}(robot_id) % 1000) / 1000.0);
+double backoff = jitter * retry_base_ * std::pow(1.5, std::min(ni->retry_count, retry_max_));
       ni->retry_after = now + rclcpp::Duration::from_seconds(backoff);
       scheduler_->mark_task_waiting(task_id);
       return false;
@@ -152,7 +168,9 @@ bool FleetManagerNode::start_navigation(
       PersistLogger::log_info("nav.single_wp_blocked", robot_id, task_id,
         "wp=" + wp + " blocker=" + blocker, __FILE__, __LINE__, __func__);
       ni->retry_count++;
-      double backoff = retry_base_ * std::pow(1.5, std::min(ni->retry_count, retry_max_));
+      // Per-robot jitter: prevents simultaneous retry of multiple blocked robots
+double jitter = 0.7 + 0.6 * (static_cast<double>(std::hash<std::string>{}(robot_id) % 1000) / 1000.0);
+double backoff = jitter * retry_base_ * std::pow(1.5, std::min(ni->retry_count, retry_max_));
       ni->retry_after = now + rclcpp::Duration::from_seconds(backoff);
       scheduler_->mark_task_waiting(task_id);
       return false;
@@ -226,8 +244,120 @@ void FleetManagerNode::navigate_to_next_waypoint(const std::string & robot_id)
 
       // wait with backoff
       ni->retry_count++;
-      double backoff = retry_base_ * std::pow(1.5, std::min(ni->retry_count, retry_max_));
+      // Per-robot jitter: prevents simultaneous retry of multiple blocked robots
+double jitter = 0.7 + 0.6 * (static_cast<double>(std::hash<std::string>{}(robot_id) % 1000) / 1000.0);
+double backoff = jitter * retry_base_ * std::pow(1.5, std::min(ni->retry_count, retry_max_));
       ni->retry_after = this->now() + rclcpp::Duration::from_seconds(backoff);
+
+      // Blocker coordination: handle both idle AND stationary-but-blocked robots
+      if (ni->retry_count >= 2 && !is_internal_task_id(ni->current_task_id)) {
+        auto blocker_ni = get_or_create_nav(blocker);
+        auto blocker_st = robots_.find(blocker);
+        bool blocker_online = blocker_st != robots_.end() &&
+          blocker_st->second.connection_status == "online";
+        bool blocker_stationary = blocker_ni && is_robot_stationary(blocker);
+
+        if (blocker_stationary && blocker_online) {
+          bool mutual = is_mutual_block(blocker, wp, robot_id, from);
+          if (mutual) {
+            // Guard: only one chain at a time
+            if (chain_plan_.active) {
+              PersistLogger::log_info("nav.chain_busy", robot_id, ni->current_task_id,
+                "another chain already active, deferring",
+                __FILE__, __LINE__, __func__);
+              // Extend backoff to wait for the active chain to resolve this blocker
+              ni->retry_after = this->now() + rclcpp::Duration::from_seconds(5.0);
+              return;
+            }
+
+            // Save blocker's task info before chain overwrites nav state
+            chain_plan_.saved_task_ids.clear();
+            chain_plan_.saved_targets.clear();
+            if (!blocker_ni->current_task_id.empty()) {
+              chain_plan_.saved_task_ids[blocker] = blocker_ni->current_task_id;
+              if (!blocker_ni->route.empty())
+                chain_plan_.saved_targets[blocker] = blocker_ni->route.back();
+            }
+            if (!ni->current_task_id.empty()) {
+              chain_plan_.saved_task_ids[robot_id] = ni->current_task_id;
+              if (!ni->route.empty())
+                chain_plan_.saved_targets[robot_id] = ni->route.back();
+            }
+
+            std::set<std::string> blocked_set(ni->route.begin(), ni->route.end());
+            if (try_build_retreat_chain(robot_id, from, wp, blocker, blocked_set, 0)) {
+              // Pre-validation: verify all chain targets are valid
+              bool chain_valid = true;
+              for (const auto & s : chain_plan_.steps) {
+                auto test = traffic_->get_waypoint_pose(s.target_wp);
+                if (test.position.x == 0.0 && test.position.y == 0.0 && test.position.z == 0.0) {
+                  auto all = traffic_->get_all_waypoint_poses();
+                  if (all.find(s.target_wp) == all.end()) {
+                    PersistLogger::log_warn("nav.chain_invalid_wp", s.robot_id, "",
+                      "waypoint " + s.target_wp + " not in map",
+                      __FILE__, __LINE__, __func__);
+                    chain_valid = false;
+                    break;
+                  }
+                }
+              }
+              if (!chain_valid) {
+                chain_plan_.steps.clear();
+                chain_plan_.saved_task_ids.clear();
+                chain_plan_.saved_targets.clear();
+              } else {
+                chain_plan_.original_requester = robot_id;
+                chain_plan_.original_target = ni->route.back();
+                chain_plan_.original_task_id = ni->current_task_id;
+                chain_plan_.active = true;
+                chain_plan_.started_at = this->now();
+                chain_plan_.current_step = 0;
+                chain_plan_.step_retry_count = 0;
+
+                // Pause requester's nav while chain executes
+                ni->has_active_goal = false;
+                ni->route.clear();
+                ni->route_index = 0;
+                ni->retry_count = 0;
+
+                // Also pause blocker's nav
+                blocker_ni->has_active_goal = false;
+                blocker_ni->route.clear();
+                blocker_ni->route_index = 0;
+                blocker_ni->retry_count = 0;
+
+                PersistLogger::log_info("nav.chain_started", robot_id, ni->current_task_id,
+                  "chain retreat initiated, " + std::to_string(chain_plan_.steps.size()) + " steps",
+                  __FILE__, __LINE__, __func__);
+
+                execute_chain_step();
+                return;
+              }
+            }
+            chain_plan_.saved_task_ids.clear();
+            chain_plan_.saved_targets.clear();
+          }
+
+          // Simple avoidance: only for truly idle blockers (no task)
+          bool blocker_truly_idle = blocker_ni &&
+            blocker_ni->current_task_id.empty() &&
+            blocker_ni->route.empty();
+          if (!mutual && blocker_truly_idle) {
+            std::string avoid_wp = occupancy_->find_nearest_free_waypoint(wp);
+            if (!avoid_wp.empty() && avoid_wp != wp) {
+              PersistLogger::log_info("nav.avoid_idle_blocker", robot_id, ni->current_task_id,
+                "asking idle blocker " + blocker + " to move from " + wp + " to " + avoid_wp,
+                __FILE__, __LINE__, __func__);
+              blocker_ni->route = {avoid_wp};
+              blocker_ni->route_index = 0;
+              blocker_ni->current_task_id = "avoidance_" + blocker;
+              blocker_ni->retry_count = 0;
+              blocker_ni->retry_after = rclcpp::Time{};
+              navigate_to_waypoint(blocker, avoid_wp, blocker_ni->current_task_id, true);
+            }
+          }
+        }
+      }
 
       if (ni->retry_count > retry_max_ * 2) {
         // give up and requeue
@@ -240,9 +370,16 @@ void FleetManagerNode::navigate_to_next_waypoint(const std::string & robot_id)
         ni->route.clear();
         ni->route_index = 0;
         ni->retry_count = 0;
-        scheduler_->mark_task_pending(tid);
-        fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(tid);
-        task_pub_->publish(ti);
+        if (scheduler_->would_exceed_retry_cycles(tid, max_task_retry_cycles_)) {
+          scheduler_->fail_task(tid, "hop blocked, max retry cycles exceeded");
+          fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(tid);
+          task_pub_->publish(ti);
+          finalize_task_completion(robot_id, tid);
+        } else {
+          scheduler_->mark_task_pending_preserve(tid);
+          fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(tid);
+          task_pub_->publish(ti);
+        }
       }
       return;
     }
@@ -334,6 +471,11 @@ void FleetManagerNode::navigate_to_waypoint(
 
       if (r.code == rclcpp_action::ResultCode::SUCCEEDED) {
         n->retry_count = 0;
+        // Chain step completion
+        if (chain_plan_.active && task_id.rfind(kChainTaskPrefix, 0) == 0) {
+          on_chain_step_complete(robot_id, true);
+          return;
+        }
         if (is_final) {
           on_nav_succeeded(robot_id, task_id);
         } else {
@@ -356,9 +498,16 @@ void FleetManagerNode::navigate_to_waypoint(
           n->route.clear();
           n->route_index = 0;
           n->retry_count = 0;
-          scheduler_->mark_task_pending(tid);
-          fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(tid);
-          task_pub_->publish(ti);
+          if (scheduler_->would_exceed_retry_cycles(tid, max_task_retry_cycles_)) {
+            scheduler_->fail_task(tid, "nav failed repeatedly, max retry cycles exceeded");
+            fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(tid);
+            if (!ti.task_id.empty()) task_pub_->publish(ti);
+            finalize_task_completion(robot_id, tid);
+          } else {
+            scheduler_->mark_task_pending_preserve(tid);
+            fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(tid);
+            if (!ti.task_id.empty()) task_pub_->publish(ti);
+          }
         }
       }
     };
@@ -385,6 +534,21 @@ void FleetManagerNode::on_nav_succeeded(
 {
   std::lock_guard<std::recursive_mutex> lock(mtx_);
   auto ni = get_or_create_nav(robot_id);
+
+  // Internal tasks (avoidance, chain retreat, auto-relocate): just clean up nav
+  if (task_id.rfind("avoidance_", 0) == 0 ||
+      task_id.rfind(kChainTaskPrefix, 0) == 0 ||
+      task_id.rfind("relocate_", 0) == 0) {
+    if (ni) {
+      occupancy_->release_reservations(robot_id);
+      ni->current_task_id.clear();
+      ni->has_active_goal = false;
+      ni->route.clear();
+      ni->route_index = 0;
+    }
+    return;
+  }
+
   uint8_t type = scheduler_->get_task_type(task_id);
 
   if (type == 1 || type == 0) {
@@ -407,6 +571,15 @@ void FleetManagerNode::on_nav_succeeded(
 
 void FleetManagerNode::check_arrivals()
 {
+  // Chain timeout check
+  if (chain_plan_.active) {
+    const auto now = this->now();
+    if ((now - chain_plan_.started_at).seconds() >= kChainTotalTimeout) {
+      abort_chain("chain total timeout (" + std::to_string(kChainTotalTimeout) + "s)");
+      return;
+    }
+  }
+
   // waypoint arrival is handled by NavigateToPose result callbacks
   // this method provides a backup: if robot is close to target but callback
   // hasn't fired, force arrival
@@ -414,6 +587,11 @@ void FleetManagerNode::check_arrivals()
   for (auto & [rid, ni] : navs_) {
     if (!ni || !ni->has_active_goal) continue;
     if (ni->route.empty()) continue;
+
+    // Skip internal tasks (chain, avoidance, relocate) — they have their own lifecycle
+    if (!ni->current_task_id.empty() && is_internal_task_id(ni->current_task_id)) continue;
+    if (ni->current_task_id.rfind(kChainTaskPrefix, 0) == 0) continue;
+    if (ni->current_task_id.rfind("relocate_", 0) == 0) continue;
 
     // check stuck navigation
     if (ni->nav_since.nanoseconds() > 0 && nav_stuck_timeout_ > 0 &&
@@ -433,9 +611,16 @@ void FleetManagerNode::check_arrivals()
         ni->route.clear();
         ni->route_index = 0;
         ni->retry_count = 0;
-        scheduler_->mark_task_pending(tid);
-        fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(tid);
-        task_pub_->publish(ti);
+        if (scheduler_->would_exceed_retry_cycles(tid, max_task_retry_cycles_)) {
+          scheduler_->fail_task(tid, "stuck navigation, max retry cycles exceeded");
+          fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(tid);
+          task_pub_->publish(ti);
+          finalize_task_completion(rid, tid);
+        } else {
+          scheduler_->mark_task_pending_preserve(tid);
+          fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(tid);
+          task_pub_->publish(ti);
+        }
       }
     }
 
@@ -451,9 +636,16 @@ void FleetManagerNode::check_arrivals()
       ni->current_task_id.clear();
       ni->route.clear();
       ni->route_index = 0;
-      scheduler_->mark_task_pending(tid);
-      fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(tid);
-      task_pub_->publish(ti);
+      if (scheduler_->would_exceed_retry_cycles(tid, max_task_retry_cycles_)) {
+        scheduler_->fail_task(tid, "nav absolute timeout, max retry cycles exceeded");
+        fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(tid);
+        task_pub_->publish(ti);
+        finalize_task_completion(rid, tid);
+      } else {
+        scheduler_->mark_task_pending_preserve(tid);
+        fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(tid);
+        task_pub_->publish(ti);
+      }
     }
   }
 }
@@ -640,6 +832,31 @@ void FleetManagerNode::finalize_task_completion(
   ni->chassis_task_sent = false;
   ni->chassis_handshake_ok = false;
   ni->chassis_retries = 0;
+
+  // Auto-relocate from dead-end waypoints to prevent idle blocking
+  auto st = robots_.find(robot_id);
+  if (st == robots_.end() || st->second.connection_status != "online") return;
+
+  std::string current_wp = st->second.current_waypoint;
+  if (current_wp.empty())
+    current_wp = traffic_->find_nearest_waypoint(st->second.current_pose);
+
+  auto conns = traffic_->get_waypoint_connections(current_wp);
+  if (conns.size() <= 1 && !conns.empty()) {
+    // Dead-end waypoint: auto-relocate to the connected waypoint if free
+    std::string exit_wp = conns[0];
+    if (occupancy_->waypoint_blocker(robot_id, exit_wp).empty()) {
+      PersistLogger::log_info("nav.auto_relocate", robot_id, "",
+        "relocating from dead-end " + current_wp + " to " + exit_wp,
+        __FILE__, __LINE__, __func__);
+      ni->route = {exit_wp};
+      ni->route_index = 0;
+      ni->current_task_id = "relocate_" + robot_id;
+      ni->retry_count = 0;
+      ni->retry_after = rclcpp::Time{};
+      navigate_to_waypoint(robot_id, exit_wp, ni->current_task_id, true);
+    }
+  }
 }
 
 uint16_t FleetManagerNode::wp_to_u16(const std::string & wp_id) const
@@ -772,6 +989,331 @@ double FleetManagerNode::get_yaw(const geometry_msgs::msg::Quaternion & q) const
 std::string FleetManagerNode::join_route(const std::vector<std::string> & wps) const
 {
   return join_waypoints(wps);
+}
+
+// ==================== Chain Retreat Coordination ====================
+
+bool FleetManagerNode::is_robot_idle(const std::string & robot_id) const
+{
+  auto ni = navs_.find(robot_id);
+  if (ni == navs_.end() || !ni->second) return false;
+  return !ni->second->has_active_goal &&
+         ni->second->current_task_id.empty() &&
+         ni->second->route.empty() &&
+         !ni->second->chassis_task_sent;
+}
+
+bool FleetManagerNode::is_robot_stationary(const std::string & robot_id) const
+{
+  auto ni = navs_.find(robot_id);
+  if (ni == navs_.end() || !ni->second) return false;
+  // Stationary: not physically moving (no active Nav2 goal, no chassis exec)
+  return !ni->second->has_active_goal && !ni->second->chassis_task_sent;
+}
+
+bool FleetManagerNode::is_mutual_block(
+  const std::string & blocker, const std::string & blocker_wp,
+  const std::string &, const std::string & requester_wp) const
+{
+  // Check if blocker has any exit that doesn't go through requester's position
+  auto conns = traffic_->get_waypoint_connections(blocker_wp);
+  for (const auto & nb : conns) {
+    if (nb == requester_wp) continue;  // this path goes through requester
+    // Check if nb is free for blocker to enter
+    std::string b = occupancy_->can_enter(blocker, blocker_wp, nb);
+    if (b.empty() || b == blocker) {
+      // Blocker has an independent exit → not a mutual block
+      return false;
+    }
+  }
+  // All exits require going through requester → mutual block
+  return true;
+}
+
+bool FleetManagerNode::try_build_retreat_chain(
+  const std::string & requester, const std::string & from_wp,
+  const std::string & to_wp, const std::string & blocker,
+  const std::set<std::string> & blocked_set, int depth)
+{
+  if (depth >= kMaxChainDepth) {
+    PersistLogger::log_info("nav.chain_depth_exceeded", requester, "",
+      "depth=" + std::to_string(depth) + " max=" + std::to_string(kMaxChainDepth),
+      __FILE__, __LINE__, __func__);
+    return false;
+  }
+
+  // Clear current chain steps (will be rebuilt)
+  chain_plan_.steps.clear();
+
+  // Find a retreat waypoint for the requester (from from_wp)
+  auto conns = traffic_->get_waypoint_connections(from_wp);
+  std::string best_retreat;
+  std::vector<RetreatChainStep> best_subchain;
+
+  for (const auto & nb : conns) {
+    if (nb == to_wp) continue;
+    if (blocked_set.count(nb)) continue;
+
+    auto holder = occupancy_->get_zone_holder(nb);
+    if (holder.empty() || holder == requester) {
+      best_retreat = nb;
+      best_subchain.clear();
+      break;  // direct free retreat, optimal
+    }
+
+    // Occupied — try subchain if holder is stationary
+    if (is_robot_stationary(holder)) {
+      std::set<std::string> holder_blocked = blocked_set;
+      holder_blocked.insert(to_wp);
+
+      // Build subchain in a temporary plan (recursion)
+      ChainRetreatPlan saved;
+      saved.steps.swap(chain_plan_.steps);
+
+      if (try_build_retreat_chain(holder, nb, from_wp, requester, holder_blocked, depth + 1)) {
+        std::vector<RetreatChainStep> candidate = std::move(chain_plan_.steps);
+        // Restore for this level's use
+        chain_plan_.steps.swap(saved.steps);
+        if (best_retreat.empty() || candidate.size() < best_subchain.size()) {
+          best_retreat = nb;
+          best_subchain = std::move(candidate);
+        }
+      } else {
+        // Failed — restore
+        chain_plan_.steps.swap(saved.steps);
+      }
+    }
+  }
+
+  if (best_retreat.empty()) {
+    return false;
+  }
+
+  // Assemble chain from subchain + current level
+  // Subchain steps come first (innermost retreat), then requester's retreat
+  for (auto & s : best_subchain) {
+    chain_plan_.steps.push_back(std::move(s));
+  }
+
+  // Step: Requester retreats to best_retreat
+  chain_plan_.steps.push_back({requester, best_retreat});
+
+  // Step: Blocker exits to a free waypoint
+  // Blocker will move from to_wp through from_wp to a free waypoint
+  std::string blocker_dest;
+  for (const auto & nb : traffic_->get_waypoint_connections(from_wp)) {
+    if (nb == to_wp || nb == best_retreat) continue;
+    if (blocked_set.count(nb)) continue;
+    auto b = occupancy_->waypoint_blocker("", nb);
+    if (b.empty()) { blocker_dest = nb; break; }
+  }
+  if (blocker_dest.empty() && !best_retreat.empty()) {
+    // Fallback: blocker goes to wherever the requester just retreated from... no!
+    // Just find any free waypoint
+    blocker_dest = occupancy_->find_nearest_free_waypoint(from_wp, {to_wp, requester});
+  }
+  if (blocker_dest.empty()) {
+    chain_plan_.steps.clear();
+    return false;
+  }
+  chain_plan_.steps.push_back({blocker, blocker_dest});
+
+  // Step: Requester resumes to original target
+  chain_plan_.steps.push_back({requester, to_wp});
+
+  return true;
+}
+
+void FleetManagerNode::execute_chain_step()
+{
+  if (!chain_plan_.active || chain_plan_.current_step >= chain_plan_.steps.size()) {
+    return;
+  }
+
+  const auto & step = chain_plan_.steps[chain_plan_.current_step];
+  auto ni = get_or_create_nav(step.robot_id);
+  if (!ni) {
+    abort_chain("robot nav info missing");
+    return;
+  }
+
+  // Check robot is still online
+  auto st = robots_.find(step.robot_id);
+  if (st == robots_.end() || st->second.connection_status != "online") {
+    abort_chain("robot offline");
+    return;
+  }
+
+  // Pre-validation: verify target waypoint is reachable (not held by unexpected robot)
+  std::string wp_holder = occupancy_->get_zone_holder(step.target_wp);
+  if (!wp_holder.empty() && wp_holder != step.robot_id) {
+    // Target waypoint is unexpectedly occupied → abort
+    PersistLogger::log_warn("nav.chain_step_blocked", step.robot_id, "",
+      "step target " + step.target_wp + " held by " + wp_holder + ", aborting chain",
+      __FILE__, __LINE__, __func__);
+    abort_chain("step target occupied");
+    return;
+  }
+
+  // Verify waypoint exists in map
+  auto wp_pose = traffic_->get_waypoint_pose(step.target_wp);
+  if (wp_pose.position.x == 0.0 && wp_pose.position.y == 0.0 && wp_pose.position.z == 0.0) {
+    // Check if this is actually a valid (0,0,0) waypoint or missing
+    auto all_wps = traffic_->get_all_waypoint_poses();
+    if (all_wps.find(step.target_wp) == all_wps.end()) {
+      abort_chain("target waypoint not found: " + step.target_wp);
+      return;
+    }
+  }
+
+  // Reset nav state for chain step
+  ni->route = {step.target_wp};
+  ni->route_index = 0;
+  ni->current_task_id = std::string(kChainTaskPrefix) + step.robot_id;
+  ni->retry_count = 0;
+  ni->retry_after = rclcpp::Time{};
+
+  PersistLogger::log_info("nav.chain_step", step.robot_id, ni->current_task_id,
+    "step " + std::to_string(chain_plan_.current_step + 1) + "/" +
+    std::to_string(chain_plan_.steps.size()) + " target=" + step.target_wp,
+    __FILE__, __LINE__, __func__);
+
+  navigate_to_waypoint(step.robot_id, step.target_wp, ni->current_task_id, true);
+}
+
+void FleetManagerNode::on_chain_step_complete(const std::string & robot_id, bool nav_success)
+{
+  if (!chain_plan_.active) return;
+
+  const auto & step = chain_plan_.steps[chain_plan_.current_step];
+
+  // Verify this is the expected robot
+  if (step.robot_id != robot_id) {
+    PersistLogger::log_warn("nav.chain_step_mismatch", robot_id, "",
+      "expected " + step.robot_id + " at step " + std::to_string(chain_plan_.current_step),
+      __FILE__, __LINE__, __func__);
+    return;
+  }
+
+  if (!nav_success) {
+    chain_plan_.step_retry_count++;
+    if (chain_plan_.step_retry_count <= kMaxChainStepRetries) {
+      PersistLogger::log_info("nav.chain_step_retry", robot_id, "",
+        "retry " + std::to_string(chain_plan_.step_retry_count) + "/" +
+        std::to_string(kMaxChainStepRetries),
+        __FILE__, __LINE__, __func__);
+      execute_chain_step();
+      return;
+    }
+    abort_chain("step nav failed after " + std::to_string(kMaxChainStepRetries) + " retries");
+    return;
+  }
+
+  // Clear chain robot's nav state after successful step
+  auto ni = get_or_create_nav(robot_id);
+  if (ni) {
+    occupancy_->release_reservations(robot_id);
+    ni->current_task_id.clear();
+    ni->has_active_goal = false;
+    ni->route.clear();
+    ni->route_index = 0;
+  }
+
+  // Advance to next step
+  chain_plan_.step_retry_count = 0;
+  chain_plan_.current_step++;
+
+  if (chain_plan_.current_step >= chain_plan_.steps.size()) {
+    // Chain complete — restore all saved tasks
+    PersistLogger::log_info("nav.chain_complete", chain_plan_.original_requester,
+      chain_plan_.original_task_id,
+      "chain retreat finished, resuming " + std::to_string(chain_plan_.saved_task_ids.size()) + " tasks",
+      __FILE__, __LINE__, __func__);
+
+    // Save and clear chain state before re-starting navigation
+    auto saved_tasks = std::move(chain_plan_.saved_task_ids);
+    auto saved_targets = std::move(chain_plan_.saved_targets);
+    chain_plan_.active = false;
+    chain_plan_.steps.clear();
+    chain_plan_.current_step = 0;
+
+    // Restore each participant's task
+    for (const auto & [rid, tid] : saved_tasks) {
+      auto ni = get_or_create_nav(rid);
+      if (!ni) continue;
+      auto st = robots_.find(rid);
+      if (st == robots_.end() || st->second.connection_status != "online") continue;
+
+      // Skip tasks that were cancelled during chain execution
+      auto ti_check = scheduler_->get_task_info(tid);
+      if (ti_check.task_id.empty() || ti_check.status == "cancelled") {
+        PersistLogger::log_info("nav.chain_skip_cancelled", rid, tid,
+          "task was cancelled during chain, skipping restore",
+          __FILE__, __LINE__, __func__);
+        finalize_task_completion(rid, tid);
+        continue;
+      }
+
+      auto tgt_it = saved_targets.find(rid);
+      std::string tgt = (tgt_it != saved_targets.end()) ? tgt_it->second : "";
+      if (tgt.empty()) continue;
+
+      // Check if already at target
+      auto target_pose = traffic_->get_waypoint_pose(tgt);
+      double dx = st->second.current_pose.position.x - target_pose.position.x;
+      double dy = st->second.current_pose.position.y - target_pose.position.y;
+      if (std::hypot(dx, dy) <= waypoint_radius_) {
+        // Already there → complete immediately
+        scheduler_->complete_task(tid);
+        fleet_msgs::msg::TaskInfo pub_ti = scheduler_->get_task_info(tid);
+        if (!pub_ti.task_id.empty()) task_pub_->publish(pub_ti);
+        finalize_task_completion(rid, tid);
+      } else {
+        // Re-navigate
+        start_navigation(rid, tgt, tid);
+      }
+    }
+  } else {
+    execute_chain_step();
+  }
+}
+
+void FleetManagerNode::abort_chain(const std::string & reason)
+{
+  if (!chain_plan_.active) return;
+
+  PersistLogger::log_warn("nav.chain_abort", chain_plan_.original_requester,
+    chain_plan_.original_task_id,
+    "chain aborted: " + reason + " at step " + std::to_string(chain_plan_.current_step + 1),
+    __FILE__, __LINE__, __func__);
+
+  // Clean up all chain robots' nav state
+  for (size_t i = chain_plan_.current_step; i < chain_plan_.steps.size(); ++i) {
+    const auto & step = chain_plan_.steps[i];
+    auto ni = get_or_create_nav(step.robot_id);
+    if (ni) {
+      cancel_goals(ni);
+      occupancy_->release_reservations(step.robot_id);
+      stop_robot(step.robot_id, 5);
+      ni->current_task_id.clear();
+      ni->has_active_goal = false;
+      ni->route.clear();
+      ni->route_index = 0;
+    }
+  }
+
+  auto saved_tasks = std::move(chain_plan_.saved_task_ids);
+  chain_plan_.active = false;
+  chain_plan_.steps.clear();
+  chain_plan_.current_step = 0;
+
+  // Re-queue all saved tasks with preserved binding
+  for (const auto & [rid, tid] : saved_tasks) {
+    if (tid.empty()) continue;
+    scheduler_->mark_task_pending_preserve(tid);
+    fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(tid);
+    if (!ti.task_id.empty()) task_pub_->publish(ti);
+  }
 }
 
 }  // namespace fleet_manager

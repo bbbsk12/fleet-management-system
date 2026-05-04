@@ -47,10 +47,15 @@ public:
   void mark_task_executing(const std::string & task_id);
   void mark_task_waiting(const std::string & task_id);
   void mark_task_pending(const std::string & task_id);
+  void mark_task_pending_preserve(const std::string & task_id);
 
   void complete_task(const std::string & task_id);
   void fail_task(const std::string & task_id, const std::string & reason);
   void cancel_task(const std::string & task_id);
+
+  /// Check if re-queuing this task again would exceed the retry cycle limit
+  bool would_exceed_retry_cycles(const std::string & task_id, int max_cycles) const;
+  int  retry_cycle_count(const std::string & task_id) const;
 
   uint8_t get_task_type(const std::string & task_id) const;
   fleet_msgs::msg::TaskInfo get_task_info(const std::string & task_id) const;
@@ -75,6 +80,9 @@ private:
   std::map<std::string, geometry_msgs::msg::Pose> waypoint_poses_;
 
   int counter_{0};
+  std::map<std::string, int> fcfc_skip_count_;  // FCFS gate consecutive block counter
+  std::map<std::string, int> retry_cycle_count_; // re-queue count for mark_task_pending_preserve
+  static constexpr int kFcfcGateMaxSkips = 30;   // ~30s at default 1s interval
   mutable std::recursive_mutex mutex_;
 };
 

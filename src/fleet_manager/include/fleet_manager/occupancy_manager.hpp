@@ -70,6 +70,11 @@ public:
   void release_locks(const std::string & robot_id);
   void expire_stale_reservations();
 
+  // ── Ghost locks (offline robot position guard with TTL) ───────
+  void mark_ghost(const std::string & robot_id, rclcpp::Time now);
+  void clear_ghost(const std::string & robot_id);
+  void expire_ghost_locks(rclcpp::Time now, double ttl_sec);
+
   // ── Queries ───────────────────────────────────────────────
   DiscreteLocation get_location(const std::string & robot_id) const;
   std::string get_zone_holder(const std::string & wp_id) const;
@@ -86,6 +91,9 @@ private:
   static std::string edge_key(const std::string & a, const std::string & b);
   double point_to_segment_distance(
     double px, double py, double x1, double y1, double x2, double y2) const;
+
+  /// Check whether a robot_id that holds a zone lock is an expired ghost
+  bool is_holder_active(const std::string & robot_id, rclcpp::Time now, double ttl_sec) const;
 
   rclcpp::Node * node_;
 
@@ -104,6 +112,9 @@ private:
   std::map<std::string, rclcpp::Time> reservation_times_;
 
   std::map<std::string, DiscreteLocation> robot_locations_;
+
+  // ghost_locks_[R] = Time when R went offline and its zone_locks became ghosts
+  std::map<std::string, rclcpp::Time> ghost_locks_;
 
   static constexpr double kReservationTTL = 300.0;
 };

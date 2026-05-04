@@ -4,6 +4,8 @@
 #include <tf2/LinearMath/Quaternion.hpp>
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <sstream>
 
 namespace fleet_manager
 {
@@ -22,6 +24,8 @@ FleetManagerNode::FleetManagerNode()
   traffic_pub_ = this->create_publisher<fleet_msgs::msg::FleetStatus>(
     "/fleet_manager/fleet_status_traffic", 10);
   task_pub_ = this->create_publisher<fleet_msgs::msg::TaskInfo>("~/task_status", 10);
+  alert_pub_ = this->create_publisher<std_msgs::msg::String>("~/alerts", 10);
+  metrics_pub_ = this->create_publisher<std_msgs::msg::String>("~/metrics", 10);
 
   // services
   submit_srv_ = this->create_service<fleet_msgs::srv::SubmitTask>(
@@ -64,18 +68,24 @@ FleetManagerNode::FleetManagerNode()
   this->declare_parameter("chassis_exec_timeout_sec", 30.0);
   this->declare_parameter("chassis_max_retries", 3);
   this->declare_parameter("monitor_fleet_stale_timeout_sec", 4.0);
+  this->declare_parameter("ghost_lock_ttl_sec", 120.0);
+  this->declare_parameter("deadlock_timeout_sec", 10.0);
+  this->declare_parameter("max_task_retry_cycles", 5);
 
   waypoint_radius_  = this->get_parameter("waypoint_acceptance_radius").as_double();
   segment_lateral_  = this->get_parameter("traffic_segment_lateral_max").as_double();
   sched_interval_   = std::max(0.1, this->get_parameter("scheduler_interval_sec").as_double());
   retry_base_       = std::max(0.5, this->get_parameter("nav_retry_base_sec").as_double());
-  retry_max_        = this->get_parameter("nav_retry_max").as_int();
+  retry_max_        = std::max(1, static_cast<int>(this->get_parameter("nav_retry_max").as_int()));
   nav_stuck_timeout_    = this->get_parameter("nav_stuck_timeout_sec").as_double();
   nav_absolute_timeout_  = this->get_parameter("nav_absolute_timeout_sec").as_double();
   chassis_hs_timeout_   = this->get_parameter("chassis_handshake_timeout_sec").as_double();
   chassis_exec_timeout_ = this->get_parameter("chassis_exec_timeout_sec").as_double();
   chassis_max_retries_  = this->get_parameter("chassis_max_retries").as_int();
   monitor_stale_timeout_ = this->get_parameter("monitor_fleet_stale_timeout_sec").as_double();
+  ghost_lock_ttl_   = std::max(10.0, this->get_parameter("ghost_lock_ttl_sec").as_double());
+  deadlock_timeout_ = std::max(5.0, this->get_parameter("deadlock_timeout_sec").as_double());
+  max_task_retry_cycles_ = std::max(2, static_cast<int>(this->get_parameter("max_task_retry_cycles").as_int()));
 
   {
     bool en = this->get_parameter("persist_log_enabled").as_bool();
@@ -120,6 +130,9 @@ void FleetManagerNode::control_timer_callback()
   std::lock_guard<std::recursive_mutex> lock(mtx_);
   ++tick_;
 
+  // expire ghost locks from offline robots
+  occupancy_->expire_ghost_locks(this->now(), ghost_lock_ttl_);
+
   // update occupancy from live robot positions
   for (auto & [rid, st] : robots_) {
     if (st.connection_status != "online") continue;
@@ -159,6 +172,16 @@ void FleetManagerNode::control_timer_callback()
   if (++sched_phase >= period) {
     sched_phase = 0;
     schedule_tick();
+  }
+
+  deadlock_check();
+
+  // publish metrics every 5s
+  const auto now = this->now();
+  if (last_metrics_time_.nanoseconds() == 0 ||
+      (now - last_metrics_time_).seconds() >= 5.0) {
+    last_metrics_time_ = now;
+    publish_metrics();
   }
 
   publish_traffic_fleet_status();
@@ -216,10 +239,29 @@ void FleetManagerNode::fleet_status_callback(
     auto it = robots_.find(rid);
     if (it != robots_.end() && it->second.connection_status != "online") {
       occupancy_->release_reservations(rid);
+      occupancy_->mark_ghost(rid, this->now());
       auto ni = get_or_create_nav(rid);
       if (ni) { cancel_goals(ni); stop_robot(rid, 10); }
+
+      // Abort active chain if offline robot is a participant
+      if (chain_plan_.active) {
+        bool is_participant = false;
+        for (const auto & s : chain_plan_.steps) {
+          if (s.robot_id == rid) { is_participant = true; break; }
+        }
+        if (!is_participant && chain_plan_.saved_task_ids.count(rid)) {
+          is_participant = true;
+        }
+        if (is_participant) {
+          PersistLogger::log_warn("chain.participant_offline", rid, "",
+            "aborting chain due to participant offline",
+            __FILE__, __LINE__, __func__);
+          abort_chain("participant offline: " + rid);
+        }
+      }
+
       PersistLogger::log_warn("robot.offline", rid, "",
-        "positions locked as ghost guard", __FILE__, __LINE__, __func__);
+        "positions locked as ghost guard (TTL=" + std::to_string(ghost_lock_ttl_) + "s)", __FILE__, __LINE__, __func__);
     }
   }
   // offline→online: clear ghost locks, let update_location re-establish
@@ -228,6 +270,7 @@ void FleetManagerNode::fleet_status_callback(
     if (prev == prev_online.end() && st.connection_status == "online") {
       occupancy_->release_locks(rid);
       occupancy_->release_reservations(rid);
+      occupancy_->clear_ghost(rid);
       auto ni = get_or_create_nav(rid);
       if (ni) {
         ni->chassis_task_sent = false;
@@ -248,25 +291,71 @@ void FleetManagerNode::schedule_tick()
   occupancy_->expire_stale_reservations();
   scheduler_->purge_finished(200);
 
-  // recover orphaned tasks
+  // ── comprehensive orphan recovery ──
   const auto now = this->now();
   for (const auto & t : scheduler_->get_all_tasks()) {
-    if (t.status != "in_progress") continue;
+    if (t.status != "in_progress" && t.status != "waiting_fleet" &&
+        t.status != "assigned" && t.status != "executing") continue;
     if (t.assigned_robot_id.empty()) continue;
 
-    auto ni = get_or_create_nav(t.assigned_robot_id);
-    if (!ni) continue;
+    const std::string & rid = t.assigned_robot_id;
+    auto ni = get_or_create_nav(rid);
+    auto rit = robots_.find(rid);
+    bool offline = (rit == robots_.end() || rit->second.connection_status != "online");
+    bool nav_idle = ni && !ni->has_active_goal && ni->route.empty();
+    bool nav_bound = ni && ni->current_task_id == t.task_id;
+    double age_sec = (now - t.started_at).seconds();
 
-    bool idle = !ni->has_active_goal && ni->route.empty();
-    if (ni->current_task_id == t.task_id && idle) {
-      // check if just arrived at final waypoint (chassis might be executing)
-      if (t.status == "in_progress" && ni->chassis_task_sent) continue;
-      // stale binding: recover
-      PersistLogger::log_warn("sched.orphan", t.assigned_robot_id, t.task_id,
-        "recovering orphaned task", __FILE__, __LINE__, __func__);
-      scheduler_->mark_task_pending(t.task_id);
-      fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(t.task_id);
-      if (!ti.task_id.empty()) task_pub_->publish(ti);
+    // ── executing: chassis timeout handles retries;
+    //     if robot offline and past all chassis deadlines, fail ──
+    if (t.status == "executing") {
+      if (offline && age_sec > chassis_hs_timeout_ + chassis_exec_timeout_ + 10.0) {
+        PersistLogger::log_warn("sched.orphan_executing", rid, t.task_id,
+          "executing task on offline robot, failing", __FILE__, __LINE__, __func__);
+        scheduler_->fail_task(t.task_id, "robot offline during execution");
+        fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(t.task_id);
+        if (!ti.task_id.empty()) task_pub_->publish(ti);
+        if (ni) finalize_task_completion(rid, t.task_id);
+      }
+      continue;
+    }
+
+    // ── in_progress: nav bound but idle → orphan ──
+    if (t.status == "in_progress") {
+      if (nav_bound && nav_idle && !ni->chassis_task_sent) {
+        PersistLogger::log_warn("sched.orphan_in_progress", rid, t.task_id,
+          "in_progress task with idle nav, recovering", __FILE__, __LINE__, __func__);
+        scheduler_->mark_task_pending(t.task_id);
+        fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(t.task_id);
+        if (!ti.task_id.empty()) task_pub_->publish(ti);
+      }
+      continue;
+    }
+
+    // ── waiting_fleet: robot offline and stale → recover ──
+    if (t.status == "waiting_fleet") {
+      if (offline && nav_idle && age_sec > 30.0) {
+        PersistLogger::log_warn("sched.orphan_waiting", rid, t.task_id,
+          "waiting_fleet task on offline robot for " + std::to_string(age_sec) + "s, recovering",
+          __FILE__, __LINE__, __func__);
+        scheduler_->mark_task_pending(t.task_id);
+        fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(t.task_id);
+        if (!ti.task_id.empty()) task_pub_->publish(ti);
+      }
+      continue;
+    }
+
+    // ── assigned: nav idle for > 10s → orphan ──
+    if (t.status == "assigned") {
+      if (nav_bound && nav_idle && age_sec > 10.0) {
+        PersistLogger::log_warn("sched.orphan_assigned", rid, t.task_id,
+          "assigned task idle for " + std::to_string(age_sec) + "s, recovering",
+          __FILE__, __LINE__, __func__);
+        scheduler_->mark_task_pending(t.task_id);
+        fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(t.task_id);
+        if (!ti.task_id.empty()) task_pub_->publish(ti);
+      }
+      continue;
     }
   }
 
@@ -290,6 +379,32 @@ void FleetManagerNode::assign_pending_tasks()
   }
 
   scheduler_->repair_queue();
+
+  // ── waiting_fleet redispatch: retry deferred tasks after backoff ──
+  for (const auto & t : scheduler_->get_all_tasks()) {
+    if (t.status != "waiting_fleet") continue;
+    if (t.assigned_robot_id.empty()) continue;
+
+    const std::string & rid = t.assigned_robot_id;
+    auto ni = get_or_create_nav(rid);
+    if (!ni) continue;
+
+    // Skip if robot is already busy with another task
+    if (!ni->current_task_id.empty() && ni->current_task_id != t.task_id) continue;
+    if (ni->has_active_goal || !ni->route.empty() || ni->chassis_task_sent) continue;
+
+    // Check backoff
+    if (ni->retry_after.nanoseconds() > 0 && now < ni->retry_after) continue;
+
+    // Check offline
+    auto st = robots_.find(rid);
+    if (st == robots_.end() || st->second.connection_status != "online") continue;
+
+    PersistLogger::log_info("sched.redispatch_waiting", rid, t.task_id,
+      "retrying deferred task to wp=" + t.waypoint_id,
+      __FILE__, __LINE__, __func__);
+    start_navigation(rid, t.waypoint_id, t.task_id);
+  }
 
   // build online robot list
   std::vector<fleet_msgs::msg::RobotStatus> online;
@@ -315,6 +430,76 @@ void FleetManagerNode::assign_pending_tasks()
   auto wp_poses = traffic_->get_all_waypoint_poses();
   auto assigned = scheduler_->assign_tasks_batch(online, wp_poses);
 
+  // Bottleneck conflict check: defer tasks that would create opposite-direction
+  // traffic through the same narrow passages
+  if (assigned.size() >= 2) {
+    // Build approximate paths for each assigned task
+    std::map<std::string, std::vector<std::string>> paths;
+    std::map<std::string, std::set<std::pair<std::string, std::string>>> edges_used;
+    for (const auto & t : assigned) {
+      if (t.task_id.empty()) continue;
+      auto st = robots_.find(t.assigned_robot_id);
+      if (st == robots_.end()) continue;
+
+      // Find approximate start waypoint
+      std::string swp = st->second.current_waypoint;
+      if (swp.empty()) swp = traffic_->find_nearest_waypoint(st->second.current_pose);
+      if (swp.empty()) continue;
+
+      auto p = traffic_->find_path(swp, t.waypoint_id);
+      if (p.size() < 2) continue;
+      paths[t.task_id] = p;
+
+      // Extract directed edges
+      std::set<std::pair<std::string, std::string>> edges;
+      for (size_t i = 0; i + 1 < p.size(); ++i)
+        edges.insert({p[i], p[i + 1]});
+      edges_used[t.task_id] = std::move(edges);
+    }
+
+    // Check for opposite-direction edge conflicts
+    for (size_t i = 0; i < assigned.size(); ++i) {
+      if (assigned[i].task_id.empty()) continue;
+      auto ei = edges_used.find(assigned[i].task_id);
+      if (ei == edges_used.end()) continue;
+
+      for (size_t j = i + 1; j < assigned.size(); ++j) {
+        if (assigned[j].task_id.empty()) continue;
+        auto ej = edges_used.find(assigned[j].task_id);
+        if (ej == edges_used.end()) continue;
+
+        bool conflict = false;
+        for (const auto & [a, b] : ei->second) {
+          if (ej->second.count({b, a})) { conflict = true; break; }
+        }
+        if (!conflict) continue;
+
+        // Conflict found: defer lower-priority task
+        std::string defer_tid = (assigned[i].priority < assigned[j].priority) ?
+          assigned[i].task_id : assigned[j].task_id;
+        int defer_idx = (assigned[i].task_id == defer_tid) ?
+          static_cast<int>(i) : static_cast<int>(j);
+
+        PersistLogger::log_warn("sched.bottleneck_defer",
+          assigned[defer_idx].assigned_robot_id, defer_tid,
+          "conflict with task " +
+          assigned[defer_idx == static_cast<int>(i) ? static_cast<int>(j) : static_cast<int>(i)].task_id +
+          ", deferring to serialize bottleneck passage",
+          __FILE__, __LINE__, __func__);
+
+        // Defer with preserved binding and a 5s backoff to prevent immediate redispatch
+        scheduler_->mark_task_pending_preserve(defer_tid);
+        auto defer_ni = get_or_create_nav(assigned[defer_idx].assigned_robot_id);
+        if (defer_ni) {
+          defer_ni->retry_after = this->now() + rclcpp::Duration::from_seconds(5.0);
+        }
+        fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(defer_tid);
+        if (!ti.task_id.empty()) task_pub_->publish(ti);
+        assigned[defer_idx].task_id.clear();  // mark as handled
+      }
+    }
+  }
+
   for (auto & t : assigned) {
     if (t.task_id.empty()) continue;
 
@@ -322,7 +507,11 @@ void FleetManagerNode::assign_pending_tasks()
     auto ni = get_or_create_nav(t.assigned_robot_id);
     if (ni && (ni->has_active_goal || !ni->route.empty() ||
                !ni->current_task_id.empty() || ni->chassis_task_sent)) {
-      scheduler_->mark_task_pending(t.task_id);
+      // Defer with backoff instead of immediate re-queue to avoid busy loop
+      scheduler_->mark_task_waiting(t.task_id);
+      ni->retry_after = this->now() + rclcpp::Duration::from_seconds(3.0);
+      fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(t.task_id);
+      if (!ti.task_id.empty()) task_pub_->publish(ti);
       continue;
     }
 
@@ -330,6 +519,176 @@ void FleetManagerNode::assign_pending_tasks()
       "assigned to wp=" + t.waypoint_id, __FILE__, __LINE__, __func__);
     start_navigation(t.assigned_robot_id, t.waypoint_id, t.task_id);
   }
+}
+
+// ==================== Deadlock Detection ====================
+
+void FleetManagerNode::deadlock_check()
+{
+  std::lock_guard<std::recursive_mutex> lock(mtx_);
+  const auto now = this->now();
+
+  // Build blocking graph: robot → robot that blocks its next waypoint
+  // Include BOTH robots with active Nav2 goals AND robots blocked at waypoints
+  // (has_active_goal=false but route non-empty, waiting for next hop to clear)
+  std::map<std::string, std::string> block_graph;
+  for (auto & [rid, ni] : navs_) {
+    if (!ni || ni->route.empty() || ni->route_index >= ni->route.size()) continue;
+    // Must have an active task (not just stale route)
+    if (ni->current_task_id.empty()) continue;
+
+    std::string next_wp = ni->route[ni->route_index];
+    std::string blocker = occupancy_->waypoint_blocker(rid, next_wp);
+    if (!blocker.empty() && blocker != rid) {
+      block_graph[rid] = blocker;
+    }
+  }
+
+  // DFS cycle detection
+  std::vector<std::string> cycle;
+  for (const auto & [rid, _] : block_graph) {
+    std::map<std::string, size_t> seen;
+    std::vector<std::string> chain;
+    std::string cur = rid;
+    while (!cur.empty()) {
+      if (seen.count(cur)) {
+        cycle.assign(chain.begin() + static_cast<long>(seen[cur]), chain.end());
+        break;
+      }
+      seen[cur] = chain.size();
+      chain.push_back(cur);
+      auto nxt = block_graph.find(cur);
+      if (nxt == block_graph.end()) break;
+      cur = nxt->second;
+    }
+    if (cycle.size() >= 2) break;
+  }
+
+  if (cycle.size() < 2) {
+    prev_cycle_key_.clear();
+    cycle_first_seen_ = rclcpp::Time{};
+    return;
+  }
+
+  // Build stable key for this cycle (sort to normalize rotation)
+  std::string cycle_key;
+  {
+    std::vector<std::string> sorted = cycle;
+    std::sort(sorted.begin(), sorted.end());
+    for (const auto & r : sorted) cycle_key += r + "|";
+  }
+
+  if (cycle_key != prev_cycle_key_) {
+    prev_cycle_key_ = cycle_key;
+    cycle_first_seen_ = now;
+    PersistLogger::log_info("deadlock.detected", "", "",
+      "cycle=" + cycle_key, __FILE__, __LINE__, __func__);
+    return;
+  }
+
+  double duration = (now - cycle_first_seen_).seconds();
+  if (duration < deadlock_timeout_) return;
+
+  // Break the deadlock
+  deadlock_break_count_++;
+  PersistLogger::log_warn("deadlock.break", "", "",
+    "deadlock persisted for " + std::to_string(duration) + "s, breaking circle of " +
+    std::to_string(cycle.size()) + " robots",
+    __FILE__, __LINE__, __func__);
+
+  // Choose the victim: robot with lowest priority task
+  std::string victim;
+  int victim_pri = std::numeric_limits<int>::max();
+  for (const auto & rid : cycle) {
+    auto ni = navs_.find(rid);
+    if (ni == navs_.end() || !ni->second) continue;
+    auto ti = scheduler_->get_task_info(ni->second->current_task_id);
+    int pri = ti.task_id.empty() ? 0 : ti.priority;
+    if (pri < victim_pri || (pri == victim_pri && victim.empty())) {
+      victim_pri = pri;
+      victim = rid;
+    }
+  }
+
+  if (victim.empty()) return;
+
+  auto ni = navs_.find(victim);
+  if (ni == navs_.end() || !ni->second) return;
+
+  std::string tid = ni->second->current_task_id;
+  cancel_goals(ni->second);
+  occupancy_->release_reservations(victim);
+  ni->second->current_task_id.clear();
+  ni->second->route.clear();
+  ni->second->route_index = 0;
+  ni->second->retry_count = 0;
+  stop_robot(victim, 5);
+
+  // Physically relocate victim away from the deadlock waypoint
+  // to actually clear the bottleneck for other robots in the cycle
+  auto st = robots_.find(victim);
+  if (st != robots_.end()) {
+    std::string cur_wp = st->second.current_waypoint;
+    if (cur_wp.empty())
+      cur_wp = traffic_->find_nearest_waypoint(st->second.current_pose);
+    if (!cur_wp.empty()) {
+      std::string relocate_wp = occupancy_->find_nearest_free_waypoint(cur_wp);
+      if (!relocate_wp.empty() && relocate_wp != cur_wp) {
+        PersistLogger::log_info("deadlock.relocate_victim", victim, tid,
+          "relocating victim from " + cur_wp + " to " + relocate_wp,
+          __FILE__, __LINE__, __func__);
+        ni->second->route = {relocate_wp};
+        ni->second->route_index = 0;
+        ni->second->current_task_id = "relocate_" + victim;
+        ni->second->retry_count = 0;
+        ni->second->retry_after = rclcpp::Time{};
+        // Release the victim's current zone lock so others can pass
+        occupancy_->release_locks(victim);
+        navigate_to_waypoint(victim, relocate_wp, ni->second->current_task_id, true);
+        // Note: task is still preserved — will be assigned after relocate completes
+      }
+    }
+  }
+
+  if (!tid.empty()) {
+    scheduler_->mark_task_pending_preserve(tid);
+    fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(tid);
+    if (!ti.task_id.empty()) task_pub_->publish(ti);
+  }
+
+  prev_cycle_key_.clear();
+  cycle_first_seen_ = rclcpp::Time{};
+}
+
+// ==================== Metrics ====================
+
+void FleetManagerNode::publish_metrics()
+{
+  std_msgs::msg::String msg;
+
+  size_t online = 0, offline = 0;
+  for (const auto & [_, st] : robots_) {
+    if (st.connection_status == "online") online++; else offline++;
+  }
+
+  size_t pending = 0, active = 0, completed = 0, failed = 0;
+  for (const auto & t : scheduler_->get_all_tasks()) {
+    if (t.status == "pending" || t.status == "waiting_fleet" || t.status == "assigned") pending++;
+    else if (t.status == "in_progress" || t.status == "executing") active++;
+    else if (t.status == "completed") completed++;
+    else if (t.status == "failed") failed++;
+  }
+
+  std::ostringstream oss;
+  oss << "robots_online=" << online
+      << " robots_offline=" << offline
+      << " tasks_pending=" << pending
+      << " tasks_active=" << active
+      << " tasks_completed=" << completed
+      << " tasks_failed=" << failed
+      << " deadlock_breaks=" << deadlock_break_count_;
+  msg.data = oss.str();
+  metrics_pub_->publish(msg);
 }
 
 }  // namespace fleet_manager

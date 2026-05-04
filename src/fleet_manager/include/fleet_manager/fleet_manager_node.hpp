@@ -22,6 +22,7 @@
 #include <fleet_msgs/srv/load_traffic_map.hpp>
 #include <fleet_msgs/srv/save_traffic_map.hpp>
 #include <fleet_msgs/srv/remove_robot.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <memory>
 #include <string>
 #include <map>
@@ -80,6 +81,29 @@ struct RobotNavInfo
   bool    led_received{false};
 };
 
+// ── Chain retreat structures ───────────────────────
+
+struct RetreatChainStep
+{
+  std::string robot_id;
+  std::string target_wp;   // single-hop destination
+};
+
+struct ChainRetreatPlan
+{
+  std::string original_requester;
+  std::string original_target;
+  std::string original_task_id;
+  // Saved state for participants that had tasks before the chain
+  std::map<std::string, std::string> saved_task_ids;    // robot_id → original task_id
+  std::map<std::string, std::string> saved_targets;     // robot_id → original target_wp
+  std::vector<RetreatChainStep> steps;
+  size_t current_step{0};
+  bool active{false};
+  rclcpp::Time started_at;
+  int step_retry_count{0};
+};
+
 class FleetManagerNode : public rclcpp::Node
 {
 public:
@@ -115,10 +139,12 @@ private:
     std::shared_ptr<fleet_msgs::srv::RemoveRobot::Response> res);
 
   void publish_traffic_fleet_status();
+  void publish_metrics();
 
   // ── Scheduling ──────────────────────────────────────
   void schedule_tick();
   void assign_pending_tasks();
+  void deadlock_check();
 
   // ── Navigation ──────────────────────────────────────
   bool start_navigation(const std::string & robot_id,
@@ -132,6 +158,18 @@ private:
   void on_nav_succeeded(const std::string & robot_id,
                         const std::string & task_id);
   void check_arrivals();
+
+  // ── Chain retreat coordination ─────────────────────
+  bool is_robot_idle(const std::string & robot_id) const;
+  bool is_robot_stationary(const std::string & robot_id) const;
+  bool is_mutual_block(const std::string & blocker, const std::string & blocker_wp,
+                       const std::string & requester, const std::string & requester_wp) const;
+  bool try_build_retreat_chain(const std::string & requester, const std::string & from_wp,
+                               const std::string & to_wp, const std::string & blocker,
+                               const std::set<std::string> & blocked_set, int depth);
+  void execute_chain_step();
+  void on_chain_step_complete(const std::string & robot_id, bool nav_success);
+  void abort_chain(const std::string & reason);
 
   // ── Chassis ─────────────────────────────────────────
   void send_chassis_cmd(const std::string & robot_id,
@@ -166,6 +204,8 @@ private:
   rclcpp::Subscription<fleet_msgs::msg::FleetStatus>::SharedPtr fleet_sub_;
   rclcpp::Publisher<fleet_msgs::msg::FleetStatus>::SharedPtr  traffic_pub_;
   rclcpp::Publisher<fleet_msgs::msg::TaskInfo>::SharedPtr      task_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr           alert_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr           metrics_pub_;
 
   rclcpp::Service<fleet_msgs::srv::SubmitTask>::SharedPtr     submit_srv_;
   rclcpp::Service<fleet_msgs::srv::CancelTask>::SharedPtr     cancel_srv_;
@@ -195,6 +235,15 @@ private:
   rclcpp::Time last_fleet_time_{};
   uint64_t tick_{0};
 
+  // ── Chain retreat state ─────────────────────────────
+  ChainRetreatPlan chain_plan_;
+
+  // ── Deadlock detection state ────────────────────────────
+  std::string prev_cycle_key_;    // serialized key of last detected cycle
+  rclcpp::Time cycle_first_seen_; // when the current cycle was first detected
+  uint64_t deadlock_break_count_{0}; // total deadlocks broken
+  rclcpp::Time last_metrics_time_{}; // last metrics publication time
+
   // ── Params ──────────────────────────────────────────
   double waypoint_radius_{0.5};
   double segment_lateral_{1.2};
@@ -207,6 +256,9 @@ private:
   double chassis_exec_timeout_{30.0};
   int    chassis_max_retries_{3};
   double monitor_stale_timeout_{4.0};
+  double ghost_lock_ttl_{120.0};
+  double deadlock_timeout_{10.0};
+  int    max_task_retry_cycles_{5};
 };
 
 }  // namespace fleet_manager

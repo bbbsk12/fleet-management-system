@@ -147,8 +147,22 @@ std::vector<fleet_msgs::msg::TaskInfo> TaskScheduler::assign_tasks_batch(
       unmatched.push_back(task);
       // fixed tasks don't block the FCFS gate
       if (!task.assigned_robot_id.empty()) continue;
+
+      // FCFS gate with timeout: if same task blocks repeatedly,
+      // skip it to avoid starving lower-priority tasks
+      auto & skip_count = fcfc_skip_count_[task.task_id];
+      skip_count++;
+      if (skip_count >= kFcfcGateMaxSkips) {
+        PersistLogger::log_warn("sched.fcfc_skip", "", task.task_id,
+          "FCFS gate blocked " + std::to_string(skip_count) + " ticks, skipping",
+          __FILE__, __LINE__, __func__);
+        skip_count = 0;
+        continue;  // skip this task, continue to lower-priority
+      }
       break;  // FCFS gate
     }
+
+    fcfc_skip_count_.erase(task.task_id);  // reset on successful assignment
 
     task.assigned_robot_id = best;
     task.status = "assigned";
@@ -208,14 +222,48 @@ void TaskScheduler::mark_task_pending(const std::string & task_id)
   queue_.push(it->second);
 }
 
+void TaskScheduler::mark_task_pending_preserve(const std::string & task_id)
+{
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  auto it = all_.find(task_id);
+  if (it == all_.end()) return;
+
+  remove_from_queue(task_id);
+  it->second.status = "pending";
+  // keep assigned_robot_id binding (do NOT clear)
+  retry_cycle_count_[task_id]++;  // track re-queue count
+  queue_.push(it->second);
+
+  PersistLogger::log_info("sched.preserve", it->second.assigned_robot_id, task_id,
+    "re-queued preserving robot binding (cycle=" +
+    std::to_string(retry_cycle_count_[task_id]) + ")",
+    __FILE__, __LINE__, __func__);
+}
+
+bool TaskScheduler::would_exceed_retry_cycles(const std::string & task_id, int max_cycles) const
+{
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  auto it = retry_cycle_count_.find(task_id);
+  return (it != retry_cycle_count_.end() && it->second >= max_cycles);
+}
+
+int TaskScheduler::retry_cycle_count(const std::string & task_id) const
+{
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  auto it = retry_cycle_count_.find(task_id);
+  return (it != retry_cycle_count_.end()) ? it->second : 0;
+}
+
 void TaskScheduler::complete_task(const std::string & task_id)
 {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   remove_from_queue(task_id);
   auto it = all_.find(task_id);
   if (it != all_.end()) {
+    if (is_finished(it->second.status)) return;
     it->second.status = "completed";
     it->second.completed_at = node_->now();
+    retry_cycle_count_.erase(task_id);
     PersistLogger::log_info("sched.complete", it->second.assigned_robot_id, task_id,
       "task completed", __FILE__, __LINE__, __func__);
   }
@@ -227,7 +275,10 @@ void TaskScheduler::fail_task(const std::string & task_id, const std::string & r
   remove_from_queue(task_id);
   auto it = all_.find(task_id);
   if (it != all_.end()) {
+    if (is_finished(it->second.status)) return;
     it->second.status = "failed";
+    fcfc_skip_count_.erase(task_id);
+    retry_cycle_count_.erase(task_id);
     PersistLogger::log_error("sched.fail", it->second.assigned_robot_id, task_id,
       reason, __FILE__, __LINE__, __func__);
   }
@@ -239,8 +290,12 @@ void TaskScheduler::cancel_task(const std::string & task_id)
   remove_from_queue(task_id);
   auto it = all_.find(task_id);
   if (it != all_.end()) {
+    // Guard: don't overwrite already-terminal status
+    if (is_finished(it->second.status)) return;
     it->second.status = "cancelled";
     fixed_.erase(task_id);
+    fcfc_skip_count_.erase(task_id);
+    retry_cycle_count_.erase(task_id);
     PersistLogger::log_info("sched.cancel", it->second.assigned_robot_id, task_id,
       "task cancelled", __FILE__, __LINE__, __func__);
   }
@@ -281,16 +336,12 @@ size_t TaskScheduler::pending_count() const
 void TaskScheduler::repair_queue()
 {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
-  std::map<std::string, int> in_q;
-  {
-    decltype(queue_) tmp = queue_;
-    while (!tmp.empty()) { in_q[tmp.top().task_id]++; tmp.pop(); }
-  }
+  // Rebuild queue from scratch: O(n log n) instead of O(n²)
+  decltype(queue_) fresh;
   for (const auto & [id, t] : all_) {
-    if (t.status != "pending" || in_q[id] > 0) continue;
-    remove_from_queue(id);
-    queue_.push(t);
+    if (t.status == "pending") fresh.push(t);
   }
+  queue_.swap(fresh);
 }
 
 void TaskScheduler::purge_finished(size_t max_keep)
@@ -308,6 +359,8 @@ void TaskScheduler::purge_finished(size_t max_keep)
   for (size_t i = max_keep; i < fin.size(); ++i) {
     all_.erase(fin[i].first);
     fixed_.erase(fin[i].first);
+    fcfc_skip_count_.erase(fin[i].first);
+    retry_cycle_count_.erase(fin[i].first);
   }
 }
 

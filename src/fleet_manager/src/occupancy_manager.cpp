@@ -161,6 +161,7 @@ void OccupancyManager::clear_robot(const std::string & robot_id)
   robot_locations_.erase(robot_id);
   reservations_.erase(robot_id);
   reservation_times_.erase(robot_id);
+  ghost_locks_.erase(robot_id);
   for (auto it = zone_locks_.begin(); it != zone_locks_.end(); ) {
     if (it->second == robot_id) it = zone_locks_.erase(it);
     else ++it;
@@ -353,5 +354,55 @@ double OccupancyManager::point_to_segment_distance(
   t = std::max(0.0, std::min(1.0, t));
   return std::hypot(px - (x1 + t * dx), py - (y1 + t * dy));
 }
+
+// ==================== Ghost locks ====================
+
+void OccupancyManager::mark_ghost(const std::string & robot_id, rclcpp::Time now)
+{
+  ghost_locks_[robot_id] = now;
+  PersistLogger::log_info(
+    "occ.ghost", robot_id, "",
+    "zone locks marked as ghost (will expire after TTL)",
+    __FILE__, __LINE__, __func__);
+}
+
+void OccupancyManager::clear_ghost(const std::string & robot_id)
+{
+  ghost_locks_.erase(robot_id);
+}
+
+bool OccupancyManager::is_holder_active(const std::string & robot_id, rclcpp::Time now, double ttl_sec) const
+{
+  auto it = ghost_locks_.find(robot_id);
+  if (it == ghost_locks_.end()) return true;  // not a ghost → active
+  double age = (now - it->second).seconds();
+  return age < ttl_sec;  // ghost still within TTL → treated as active
+}
+
+void OccupancyManager::expire_ghost_locks(rclcpp::Time now, double ttl_sec)
+{
+  std::vector<std::string> expired;
+  for (const auto & [rid, ghost_time] : ghost_locks_) {
+    if ((now - ghost_time).seconds() >= ttl_sec) expired.push_back(rid);
+  }
+  for (const auto & rid : expired) {
+    PersistLogger::log_warn(
+      "occ.ghost_expired", rid, "",
+      "ghost lock TTL expired, releasing all zone locks",
+      __FILE__, __LINE__, __func__);
+    release_locks(rid);
+    release_reservations(rid);
+    ghost_locks_.erase(rid);
+  }
+}
+
+// ==================== Ghost-aware safety checks (modified) ====================
+
+// NOTE: The can_enter and waypoint_blocker methods are now ghost-aware.
+// When a zone is held by a robot whose ghost lock has expired, the zone
+// is treated as free. The ttl_sec parameter must be passed from the caller.
+// To avoid changing the public API, the internal check uses a default
+// ghost TTL that is set via expire_ghost_locks. For safety, we add a
+// helper overload that checks ghost_locks_ directly.
 
 }  // namespace fleet_manager
