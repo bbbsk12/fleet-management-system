@@ -1,0 +1,1 @@
+import{t as e}from"./createLucideIcon-CEvBoHH7.js";var t=e(`ActivityIcon`,[[`path`,{d:`M22 12h-4l-3 9L9 3l-3 9H2`,key:`d5dnw9`}]]),n=(e,t)=>{let n=e.__vccOpts||e;for(let[e,r]of t)n[e]=r;return n};export{t as n,n as t};

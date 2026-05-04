@@ -1,1 +1,0 @@
-import{t as e}from"./createLucideIcon-CFIqB-hb.js";var t=e(`BatteryIcon`,[[`rect`,{width:`16`,height:`10`,x:`2`,y:`7`,rx:`2`,ry:`2`,key:`1w10f2`}],[`line`,{x1:`22`,x2:`22`,y1:`11`,y2:`13`,key:`4dh1rd`}]]),n=e(`MapPinIcon`,[[`path`,{d:`M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z`,key:`2oe9fu`}],[`circle`,{cx:`12`,cy:`10`,r:`3`,key:`ilqhr7`}]]);export{t as n,n as t};
