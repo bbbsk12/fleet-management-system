@@ -15,7 +15,7 @@
         theme === 'dark' ? 'bg-industrial-800 border-industrial-600' : 'bg-white border-gray-200',
         isMobile
           ? 'fixed top-0 left-0 h-full z-50 w-72 -translate-x-full'
-          : 'w-64'
+          : sidebarCollapsed ? 'w-16' : 'w-64'
       ]"
       :style="{
         borderRightWidth: '1px',
@@ -27,15 +27,25 @@
     >
       <!-- 侧边栏头部：Logo 与应用名称 -->
       <div class="h-16 flex items-center justify-between px-5" :class="theme === 'dark' ? 'border-industrial-600' : 'border-gray-200'" :style="{ borderBottomWidth: '1px', borderBottomStyle: 'solid' }">
-        <div class="flex items-center gap-3">
+        <div class="flex items-center gap-3" :class="!isMobile && sidebarCollapsed ? 'justify-center w-full' : ''">
           <div class="p-2 rounded-lg" :class="theme === 'dark' ? 'bg-cyber-blue/10' : 'bg-cyber-blue/10'">
             <Bot class="w-6 h-6 text-cyber-blue" />
           </div>
-          <div>
+          <div v-if="!sidebarCollapsed || isMobile">
             <h1 class="text-lg font-bold tracking-wider" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">FleetOS</h1>
             <p class="text-[10px] tracking-widest" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-500'">{{ t('app.subtitle') }}</p>
           </div>
         </div>
+        <!-- 桌面端侧边栏折叠按钮 -->
+        <button
+          v-if="!isMobile"
+          @click="sidebarCollapsed = !sidebarCollapsed"
+          class="p-1.5 rounded-lg transition-colors"
+          :class="theme === 'dark' ? 'hover:bg-industrial-700 text-gray-400' : 'hover:bg-gray-100 text-gray-500'"
+          :title="sidebarCollapsed ? '展开侧边栏' : '折叠侧边栏'"
+        >
+          <Menu class="w-4 h-4" />
+        </button>
         <!-- 移动端侧边栏关闭按钮 -->
         <button
           v-if="isMobile"
@@ -49,9 +59,9 @@
 
       <!-- 导航菜单区域 -->
       <nav class="flex-1 py-6 px-3 overflow-y-auto">
-        <!-- 监控中心分组 -->
-        <div class="mb-4 px-4">
-          <span class="text-xs uppercase tracking-wider font-medium" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-500'">{{ t('sidebar.monitorCenter') }}</span>
+        <!-- 主导航分组 -->
+        <div v-if="!sidebarCollapsed || isMobile" class="px-3 mb-3">
+          <span class="text-[10px] font-semibold uppercase tracking-wider text-gray-500">{{ t('sidebar.monitorCenter') }}</span>
         </div>
 
         <!-- 主路由导航项 -->
@@ -61,54 +71,75 @@
             :key="route.path"
             :to="route.path"
             class="nav-item"
-            :class="{ active: $route.path === route.path }"
+            :class="{
+              'nav-item-active': $route.path === route.path,
+              'nav-item-collapsed': !isMobile && sidebarCollapsed
+            }"
             @click="isMobile && (sidebarOpen = false)"
           >
-            <component :is="route.meta.iconComponent" class="w-5 h-5" />
-            <span class="text-sm font-medium">{{ t(route.meta.titleKey) }}</span>
-            <div v-if="$route.path === route.path" class="ml-auto w-2 h-2 rounded-full bg-cyber-blue" />
+            <component :is="route.meta.iconComponent" class="w-5 h-5 shrink-0" />
+            <span v-if="!sidebarCollapsed || isMobile" class="text-sm font-medium">{{ t(route.meta.titleKey) }}</span>
+            <div v-if="$route.path === route.path && (!sidebarCollapsed || isMobile)" class="ml-auto w-2 h-2 rounded-full bg-cyber-blue" />
           </router-link>
         </div>
 
         <!-- 系统分组 -->
-        <div class="mt-6 mb-4 px-4">
-          <span class="text-xs uppercase tracking-wider font-medium" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-500'">{{ t('sidebar.system') }}</span>
+        <div v-if="!sidebarCollapsed || isMobile" class="px-3 mb-3 mt-6">
+          <span class="text-[10px] font-semibold uppercase tracking-wider text-gray-500">{{ t('sidebar.system') }}</span>
         </div>
 
         <!-- 系统导航项 -->
         <div class="space-y-1">
-          <router-link to="/logs" class="nav-item" :class="{ active: $route.path === '/logs' }" @click="isMobile && (sidebarOpen = false)">
-            <FileText class="w-5 h-5" />
-            <span class="text-sm font-medium">{{ t('sidebar.logs') }}</span>
+          <router-link to="/logs" class="nav-item" :class="{ 'nav-item-active': $route.path === '/logs', 'nav-item-collapsed': !isMobile && sidebarCollapsed }" @click="isMobile && (sidebarOpen = false)">
+            <FileText class="w-5 h-5 shrink-0" />
+            <span v-if="!sidebarCollapsed || isMobile" class="text-sm font-medium">{{ t('sidebar.logs') }}</span>
           </router-link>
-          <router-link to="/settings" class="nav-item" :class="{ active: $route.path === '/settings' }" @click="isMobile && (sidebarOpen = false)">
-            <Settings class="w-5 h-5" />
-            <span class="text-sm font-medium">{{ t('sidebar.settings') }}</span>
+          <router-link to="/settings" class="nav-item" :class="{ 'nav-item-active': $route.path === '/settings', 'nav-item-collapsed': !isMobile && sidebarCollapsed }" @click="isMobile && (sidebarOpen = false)">
+            <Settings class="w-5 h-5 shrink-0" />
+            <span v-if="!sidebarCollapsed || isMobile" class="text-sm font-medium">{{ t('sidebar.settings') }}</span>
           </router-link>
         </div>
       </nav>
 
-      <!-- 底部系统状态面板 -->
-      <div class="p-4" :class="theme === 'dark' ? 'border-industrial-600' : 'border-gray-200'" :style="{ borderTopWidth: '1px', borderTopStyle: 'solid' }">
-        <div class="data-card rounded-lg p-4">
-          <div class="flex items-center gap-2 mb-3">
-            <Activity class="w-4 h-4" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'" />
-            <span class="text-xs uppercase tracking-wider font-medium" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">{{ t('sidebar.systemStatus') }}</span>
+      <!-- 底部区域 -->
+      <div class="border-t" :class="theme === 'dark' ? 'border-industrial-600' : 'border-gray-200'">
+        <!-- 用户品牌区域 -->
+        <div v-if="!sidebarCollapsed || isMobile" class="px-4 py-3">
+          <div class="flex items-center gap-3">
+            <div class="w-8 h-8 rounded-full bg-gradient-to-br from-cyber-blue to-cyan-400 flex items-center justify-center shrink-0">
+              <span class="text-xs font-bold text-white">FS</span>
+            </div>
+            <div class="min-w-0">
+              <p class="text-sm font-medium" :class="theme === 'dark' ? 'text-gray-200' : 'text-gray-700'">FleetOS v2.0</p>
+              <p class="text-[10px]" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'">{{ t('sidebar.connected') }}</p>
+            </div>
           </div>
-          <div class="space-y-2 text-xs sm:text-sm">
-            <div class="flex justify-between items-center">
-              <span :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-500'">{{ t('sidebar.rosConnection') }}</span>
-              <div class="flex items-center gap-2">
-                <span :class="rosConnected ? 'text-cyber-green' : 'text-cyber-red'" class="font-medium">
+        </div>
+
+        <!-- 底部系统状态面板 -->
+        <div class="p-4">
+          <div v-if="!sidebarCollapsed || isMobile" class="data-card rounded-lg p-4">
+            <div class="flex items-center gap-2 mb-3">
+              <Activity class="w-4 h-4" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'" />
+              <span class="text-xs uppercase tracking-wider font-medium" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">{{ t('sidebar.systemStatus') }}</span>
+            </div>
+            <div class="space-y-2 text-xs sm:text-sm">
+              <div class="flex justify-between items-center">
+                <span :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-500'">{{ t('sidebar.rosConnection') }}</span>
+                <div class="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium" :class="rosConnected ? 'bg-cyber-green/10 text-cyber-green' : 'bg-cyber-red/10 text-cyber-red'">
+                  <div class="w-1.5 h-1.5 rounded-full" :class="rosConnected ? 'bg-cyber-green' : 'bg-cyber-red'" />
                   {{ rosConnected ? t('sidebar.connected') : t('sidebar.notConnected') }}
-                </span>
-                <div class="w-2 h-2 rounded-full" :class="rosConnected ? 'bg-cyber-green' : 'bg-cyber-red'" />
+                </div>
+              </div>
+              <div class="flex justify-between items-center">
+                <span :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-500'">{{ t('sidebar.onlineDevices') }}</span>
+                <span class="text-cyber-blue font-medium">{{ onlineRobots }}/{{ totalRobots }}</span>
               </div>
             </div>
-            <div class="flex justify-between items-center">
-              <span :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-500'">{{ t('sidebar.onlineDevices') }}</span>
-              <span class="text-cyber-blue font-medium">{{ onlineRobots }}/{{ totalRobots }}</span>
-            </div>
+          </div>
+          <!-- 折叠状态仅显示状态指示点 -->
+          <div v-else class="flex justify-center py-2">
+            <div class="w-2 h-2 rounded-full" :class="rosConnected ? 'bg-cyber-green' : 'bg-cyber-red'" />
           </div>
         </div>
       </div>
@@ -117,7 +148,7 @@
     <!-- 主内容区域 -->
     <main class="flex-1 flex flex-col overflow-hidden min-w-0">
       <!-- 顶部导航栏 -->
-      <header class="h-14 flex items-center justify-between px-3 sm:px-4 transition-colors duration-300 shrink-0" :class="theme === 'dark' ? 'bg-industrial-800 border-industrial-600' : 'bg-white border-gray-200'" :style="{ borderBottomWidth: '1px', borderBottomStyle: 'solid' }">
+      <header class="h-16 flex items-center justify-between px-3 sm:px-4 transition-colors duration-300 shrink-0 shadow-sm" :class="theme === 'dark' ? 'bg-industrial-800 border-industrial-600' : 'bg-white border-gray-200'" :style="{ borderBottomWidth: '1px', borderBottomStyle: 'solid' }">
         <!-- 移动端菜单切换按钮 -->
         <button
           v-if="isMobile"
@@ -130,10 +161,10 @@
         <div class="flex-1" />
         <!-- 右侧工具栏：连接状态指示与主题/语言切换 -->
         <div class="flex items-center gap-2 sm:gap-4">
-          <!-- ROS 连接状态指示 -->
-          <div class="flex items-center gap-2">
-            <div class="w-2 h-2 rounded-full" :class="rosConnected ? 'bg-cyber-green' : 'bg-cyber-red'" />
-            <span class="text-sm hidden sm:inline" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">{{ rosConnected ? t('sidebar.liveMonitor') : t('sidebar.notConnected') }}</span>
+          <!-- ROS 连接状态指示（徽章样式） -->
+          <div class="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium" :class="rosConnected ? 'bg-cyber-green/10 text-cyber-green' : 'bg-cyber-red/10 text-cyber-red'">
+            <div class="w-1.5 h-1.5 rounded-full" :class="rosConnected ? 'bg-cyber-green' : 'bg-cyber-red'" />
+            <span class="text-xs hidden sm:inline">{{ rosConnected ? t('sidebar.liveMonitor') : t('sidebar.notConnected') }}</span>
           </div>
 
           <!-- 主题切换与语言切换按钮 -->
@@ -162,7 +193,7 @@
       <!-- 页面路由视图：带过渡动画 -->
       <div class="flex-1 overflow-auto p-3 sm:p-6" :class="theme === 'dark' ? 'bg-industrial-900' : 'bg-gray-50'">
         <router-view v-slot="{ Component }">
-          <transition name="fade" mode="out-in">
+          <transition name="page" mode="out-in">
             <component :is="Component" />
           </transition>
         </router-view>
@@ -190,6 +221,7 @@ const route = useRoute()
 // 侧边栏与移动端状态
 const sidebarOpen = ref(false)
 const isMobile = ref(false)
+const sidebarCollapsed = ref(false)
 
 // 从 store 中解构响应式状态与方法
 const { language, theme } = storeToRefs(settingsStore)
@@ -267,29 +299,45 @@ onUnmounted(() => {
 <!-- 导航项与过渡动画样式 -->
 <style scoped>
 .nav-item {
-  @apply w-full flex items-center px-4 py-3.5 rounded-lg transition-all duration-200;
-}
-
-.nav-item.light {
+  @apply w-full flex items-center px-4 py-3.5 rounded-lg transition-all duration-200 gap-3;
   @apply text-gray-600 hover:bg-gray-100 hover:text-gray-900;
 }
 
-.nav-item.dark {
+.dark .nav-item {
   @apply text-gray-400 hover:bg-industrial-700 hover:text-white;
 }
 
-.nav-item.active {
-  @apply bg-gradient-to-r from-cyber-blue/20 to-transparent border-l-2 border-cyber-blue text-cyber-blue;
+/* 激活状态：左侧 accent 色条 */
+.nav-item-active {
+  @apply bg-cyber-blue/10 border-l-2 border-cyber-blue text-cyber-blue;
 }
 
-/* 页面切换淡入淡出动画 */
-.fade-enter-active,
-.fade-leave-active {
-  transition: opacity 0.2s ease;
+.dark .nav-item-active {
+  @apply bg-cyber-blue/20;
 }
 
-.fade-enter-from,
-.fade-leave-to {
-  opacity: 0;
+/* 折叠状态导航项：图标居中，无内边距与间距 */
+.nav-item-collapsed {
+  @apply justify-center px-0 gap-0;
+}
+
+/* 页面切换淡入上滑动画 */
+.page-enter-active {
+  animation: fadeInUp 0.25s ease-out;
+}
+
+.page-leave-active {
+  animation: fadeInUp 0.2s ease-in reverse;
+}
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 </style>

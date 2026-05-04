@@ -30,6 +30,12 @@ export const useFleetStore = defineStore('fleet', () => {
   /** WebSocket 连接实例 */
   const ws = ref(null)
 
+  // ---- 调度器指标与告警 ----
+  /** 调度器核心指标（来自 /fleet_manager/metrics） */
+  const metrics = ref({})
+  /** 调度器告警列表（来自 /fleet_manager/alerts） */
+  const alerts = ref([])
+
   /**
    * 从 localStorage 读取已保存的系统设置
    * @returns {object} 解析后的设置对象，解析失败则返回空对象
@@ -125,6 +131,8 @@ export const useFleetStore = defineStore('fleet', () => {
         if (typeof data.payload.ros_connected === 'boolean') {
           rosConnected.value = data.payload.ros_connected
         }
+        if (data.payload.metrics) metrics.value = data.payload.metrics
+        if (data.payload.alerts) alerts.value = data.payload.alerts
         break
       case 'robot_status':
         // 单个机器人状态更新
@@ -154,6 +162,14 @@ export const useFleetStore = defineStore('fleet', () => {
           delete robots.value[data.payload.robot_id]
           robots.value = { ...robots.value }  // 触发响应式更新
         }
+        break
+      case 'alert':
+        alerts.value.unshift(data.payload)
+        if (alerts.value.length > 100) alerts.value.pop()
+        addLog('warning', `调度告警: ${data.payload.message || JSON.stringify(data.payload)}`)
+        break
+      case 'metrics_update':
+        metrics.value = data.payload
         break
     }
   }
@@ -228,6 +244,32 @@ export const useFleetStore = defineStore('fleet', () => {
     if (data?.robots) robots.value = data.robots
   }
 
+  /** 从后端获取调度器核心指标 */
+  async function fetchMetrics() {
+    try {
+      const res = await fetch('/api/metrics')
+      if (res.ok) {
+        const data = await res.json()
+        metrics.value = data.metrics || {}
+      }
+    } catch (e) {
+      console.error('Failed to fetch metrics:', e)
+    }
+  }
+
+  /** 从后端获取调度器告警列表 */
+  async function fetchAlerts() {
+    try {
+      const res = await fetch('/api/alerts?limit=50')
+      if (res.ok) {
+        const data = await res.json()
+        alerts.value = data.alerts || []
+      }
+    } catch (e) {
+      console.error('Failed to fetch alerts:', e)
+    }
+  }
+
   /**
    * 提交任务
    * @param {string} robotId - 目标机器人 ID
@@ -282,6 +324,9 @@ export const useFleetStore = defineStore('fleet', () => {
     logs,
     rosConnected,
     ws,
+    // ---- 调度器指标与告警 ----
+    metrics,
+    alerts,
     // ---- 计算属性 ----
     totalRobots,
     onlineRobots,
@@ -290,6 +335,8 @@ export const useFleetStore = defineStore('fleet', () => {
     connectWebSocket,
     sendCommand,
     refreshRobots,
+    fetchMetrics,
+    fetchAlerts,
     submitTask,
     cancelTask,
     emergencyStop,

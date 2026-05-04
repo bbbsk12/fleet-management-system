@@ -4,7 +4,8 @@
     <div class="flex items-center justify-between flex-wrap gap-2 sm:gap-4">
       <div>
         <h1 class="text-xl sm:text-2xl font-bold tracking-wide" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">{{ t('fleet.title') }}</h1>
-        <p class="text-xs sm:text-sm mt-0.5" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-500'">{{ t('fleet.subtitle') }}</p>
+        <div class="h-1 w-16 bg-gradient-to-r from-cyber-blue to-cyber-purple rounded-full mt-2 mb-1.5"></div>
+        <p class="text-xs sm:text-sm" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-500'">{{ t('fleet.subtitle') }}</p>
       </div>
       <div class="flex items-center gap-2">
         <!-- 全局紧急停止按钮 -->
@@ -27,10 +28,10 @@
     </div>
 
     <!-- 筛选与搜索栏 -->
-    <div class="flex flex-wrap items-center gap-4 p-4 rounded-lg border transition-colors" :class="theme === 'dark' ? 'bg-industrial-800/50 border-industrial-600' : 'bg-gray-50 border-gray-200'">
+    <div class="flex flex-wrap items-center gap-4 p-4 rounded-xl border transition-colors" :class="theme === 'dark' ? 'bg-industrial-800/50 border-industrial-600' : 'bg-gray-50 border-gray-200'">
       <!-- 状态筛选按钮组 -->
       <div class="flex items-center gap-2 flex-wrap">
-        <span class="text-sm" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">{{ t('common.status') }}:</span>
+        <span class="text-sm font-medium" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">{{ t('common.status') }}:</span>
         <div class="flex gap-1">
           <button
             v-for="f in filterOptions"
@@ -46,10 +47,14 @@
         </div>
       </div>
       <!-- 搜索输入框 -->
-      <div class="flex-1 min-w-[200px]">
+      <div class="relative flex-1 min-w-[200px]">
+        <svg class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 pointer-events-none" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="8"></circle>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+        </svg>
         <input
           type="text"
-          class="w-full px-4 py-2 border rounded-lg text-sm focus:border-cyber-blue focus:outline-none focus:ring-1 focus:ring-cyber-blue/20"
+          class="w-full pl-10 pr-4 py-2 border rounded-lg text-sm focus:border-cyber-blue focus:outline-none focus:ring-1 focus:ring-cyber-blue/20 transition-colors"
           :class="theme === 'dark' ? 'bg-industrial-700 border-industrial-600 text-white placeholder-gray-500' : 'bg-white border-gray-200 text-gray-900 placeholder-gray-400'"
           :placeholder="t('fleet.searchPlaceholder')"
           v-model="searchQuery"
@@ -57,22 +62,70 @@
       </div>
     </div>
 
+    <!-- 车队状态统计栏 -->
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
+      <div class="data-card rounded-xl p-3 sm:p-4 neon-border">
+        <div class="flex items-center gap-3">
+          <div class="w-10 h-10 rounded-lg bg-cyber-green/10 flex items-center justify-center shrink-0">
+            <div class="w-4 h-4 rounded-full bg-cyber-green"></div>
+          </div>
+          <div class="min-w-0">
+            <div class="text-xl sm:text-2xl font-bold text-cyber-green truncate">{{ robots.filter(r => r.online && r.status !== 'offline' && r.status !== 'failed').length }}</div>
+            <div class="text-xs uppercase tracking-wider" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-500'">{{ t('common.online') }}</div>
+          </div>
+        </div>
+      </div>
+      <div class="data-card rounded-xl p-3 sm:p-4 neon-border">
+        <div class="flex items-center gap-3">
+          <div class="w-10 h-10 rounded-lg bg-gray-500/10 flex items-center justify-center shrink-0">
+            <div class="w-4 h-4 rounded-full bg-gray-400"></div>
+          </div>
+          <div class="min-w-0">
+            <div class="text-xl sm:text-2xl font-bold" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">{{ robots.filter(r => r.status === 'idle').length }}</div>
+            <div class="text-xs uppercase tracking-wider" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-500'">{{ t('common.idle') }}</div>
+          </div>
+        </div>
+      </div>
+      <div class="data-card rounded-xl p-3 sm:p-4 neon-border">
+        <div class="flex items-center gap-3">
+          <div class="w-10 h-10 rounded-lg bg-cyber-blue/10 flex items-center justify-center shrink-0">
+            <div class="w-4 h-4 rounded-full bg-cyber-blue"></div>
+          </div>
+          <div class="min-w-0">
+            <div class="text-xl sm:text-2xl font-bold text-cyber-blue truncate">{{ robots.filter(r => r.status === 'working' || r.status === 'moving').length }}</div>
+            <div class="text-xs uppercase tracking-wider" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-500'">{{ t('common.working') }}</div>
+          </div>
+        </div>
+      </div>
+      <div class="data-card rounded-xl p-3 sm:p-4 neon-border">
+        <div class="flex items-center gap-3">
+          <div class="w-10 h-10 rounded-lg bg-cyber-red/10 flex items-center justify-center shrink-0">
+            <div class="w-4 h-4 rounded-full bg-cyber-red"></div>
+          </div>
+          <div class="min-w-0">
+            <div class="text-xl sm:text-2xl font-bold text-cyber-red truncate">{{ robots.filter(r => !r.online || r.status === 'offline' || r.status === 'failed').length }}</div>
+            <div class="text-xs uppercase tracking-wider" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-500'">{{ t('common.offline') }}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- 机器人卡片网格 -->
-    <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
       <div
         v-for="robot in filteredRobots"
         :key="robot.id"
-        class="data-card rounded-xl p-4 neon-border"
+        class="data-card rounded-xl p-4 neon-border transition-all duration-200"
         :class="{ 'opacity-60 border-cyber-red/30': !robot.online || robot.status === 'offline' }"
       >
         <!-- 卡片头部：机器人标识与状态 -->
         <div class="flex items-start justify-between mb-4">
           <div class="flex items-center gap-3">
-            <div class="p-2.5 rounded-lg bg-cyber-blue/10">
-              <Bot class="w-6 h-6 text-cyber-blue" />
+            <div class="p-3 rounded-xl bg-cyber-blue/10">
+              <Bot class="w-7 h-7 text-cyber-blue" />
             </div>
-            <div>
-              <h3 class="font-bold" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">{{ robot.id }}</h3>
+            <div class="min-w-0">
+              <h3 class="font-bold text-base truncate" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">{{ robot.id }}</h3>
               <span
                 class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium mt-1"
                 :class="statusClass(robot.status)"
@@ -84,7 +137,7 @@
           </div>
           <!-- 更多操作按钮 -->
           <button
-            class="p-2 rounded-lg transition-colors"
+            class="p-2 rounded-lg transition-colors shrink-0"
             :class="theme === 'dark' ? 'bg-industrial-700 text-gray-400 hover:text-white hover:bg-industrial-600' : 'bg-gray-100 text-gray-500 hover:text-gray-900 hover:bg-gray-200'"
             @click="showRobotDetail(robot)"
           >
@@ -94,10 +147,10 @@
 
         <!-- 机器人详细信息区域 -->
         <div class="space-y-3 mb-4">
-          <!-- 电量 -->
+          <!-- 电量（带进度条） -->
           <div class="flex items-center justify-between">
             <div class="flex items-center gap-2 text-sm" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">
-              <Battery class="w-4 h-4" />
+              <Battery class="w-4 h-4 shrink-0" />
               <span>{{ t('fleet.battery') }}</span>
             </div>
             <div class="flex items-center gap-2">
@@ -115,7 +168,7 @@
           <!-- 坐标位置 -->
           <div class="flex items-center justify-between">
             <div class="flex items-center gap-2 text-sm" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">
-              <MapPin class="w-4 h-4" />
+              <MapPin class="w-4 h-4 shrink-0" />
               <span>{{ t('fleet.position') }}</span>
             </div>
             <span class="text-sm font-mono" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">
@@ -126,7 +179,7 @@
           <!-- 所在位置（航点/路段） -->
           <div class="flex items-center justify-between">
             <div class="flex items-center gap-2 text-sm" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">
-              <Navigation class="w-4 h-4" />
+              <Navigation class="w-4 h-4 shrink-0" />
               <span>{{ t('fleet.location') }}</span>
             </div>
             <span
@@ -155,10 +208,10 @@
           <!-- 当前任务 -->
           <div class="flex items-center justify-between">
             <div class="flex items-center gap-2 text-sm" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">
-              <ListTodo class="w-4 h-4" />
+              <ListTodo class="w-4 h-4 shrink-0" />
               <span>{{ t('fleet.currentTask') }}</span>
             </div>
-            <span class="text-sm" :class="theme === 'dark' ? 'text-gray-300' : 'text-gray-600'">{{ robot.current_task || t('common.noTask') }}</span>
+            <span class="text-sm truncate" :class="theme === 'dark' ? 'text-gray-300' : 'text-gray-600'">{{ robot.current_task || t('common.noTask') }}</span>
           </div>
         </div>
 
@@ -197,17 +250,19 @@
       </div>
 
       <!-- 无匹配结果占位 -->
-      <div v-if="filteredRobots.length === 0" class="col-span-full">
-        <div class="data-card rounded-xl p-12 neon-border text-center">
-          <Bot class="w-16 h-16 mx-auto mb-4" :class="theme === 'dark' ? 'text-gray-600' : 'text-gray-300'" />
-          <p :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">{{ t('fleet.noMatchingRobots') }}</p>
+      <div v-if="filteredRobots.length === 0" class="col-span-full flex items-center justify-center py-16">
+        <div class="text-center">
+          <div class="w-20 h-20 mx-auto mb-4 rounded-full flex items-center justify-center" :class="theme === 'dark' ? 'bg-industrial-700/50' : 'bg-gray-100'">
+            <Bot class="w-10 h-10" :class="theme === 'dark' ? 'text-gray-600' : 'text-gray-300'" />
+          </div>
+          <p class="text-base font-medium" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">{{ t('fleet.noMatchingRobots') }}</p>
         </div>
       </div>
     </div>
 
     <!-- 机器人详情弹窗 -->
     <div v-if="selectedRobot" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4" @click.self="selectedRobot = null">
-      <div class="data-card rounded-xl p-6 neon-border w-full max-w-lg animate-scale-in">
+      <div class="data-card rounded-xl p-6 neon-border w-full max-w-2xl mx-auto animate-scale-in max-h-[90vh] overflow-y-auto">
         <div class="flex items-center justify-between mb-6">
           <h2 class="text-xl font-bold flex items-center gap-3" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">
             <Bot class="w-6 h-6 text-cyber-blue" />
@@ -222,43 +277,77 @@
           </button>
         </div>
 
-        <!-- 详情信息网格 -->
-        <div class="grid grid-cols-2 gap-4">
-          <div class="p-3 rounded-lg transition-colors" :class="theme === 'dark' ? 'bg-industrial-700/50' : 'bg-gray-50'">
-            <span class="text-xs block mb-1" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'">{{ t('common.status') }}</span>
-            <span class="text-sm font-medium" :class="statusTextClass(selectedRobot.status)">
-              {{ statusText(selectedRobot.status) }}
-            </span>
+        <!-- 双列布局：左侧机器人信息 / 右侧任务与路由 -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <!-- 左侧：机器人基本信息 -->
+          <div class="space-y-3">
+            <h3 class="text-xs font-semibold uppercase tracking-wider" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'">{{ t('fleet.robotDetail') }}</h3>
+            <div class="p-3 rounded-lg transition-colors" :class="theme === 'dark' ? 'bg-industrial-700/50' : 'bg-gray-50'">
+              <span class="text-xs block mb-1" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'">{{ t('common.status') }}</span>
+              <span class="text-sm font-medium" :class="statusTextClass(selectedRobot.status)">
+                {{ statusText(selectedRobot.status) }}
+              </span>
+            </div>
+            <div class="p-3 rounded-lg transition-colors" :class="theme === 'dark' ? 'bg-industrial-700/50' : 'bg-gray-50'">
+              <span class="text-xs block mb-1" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'">{{ t('fleet.battery') }}</span>
+              <div class="flex items-center gap-2">
+                <div class="flex-1 h-2 rounded-full overflow-hidden" :class="theme === 'dark' ? 'bg-industrial-700' : 'bg-gray-200'">
+                  <div
+                    class="h-full rounded-full transition-all duration-300"
+                    :class="batteryClass(selectedRobot.battery)"
+                    :style="{ width: selectedRobot.battery + '%' }"
+                  />
+                </div>
+                <span class="text-sm font-medium whitespace-nowrap" :class="batteryTextClass(selectedRobot.battery)">{{ selectedRobot.battery }}%</span>
+              </div>
+            </div>
+            <div class="grid grid-cols-2 gap-2">
+              <div class="p-3 rounded-lg transition-colors" :class="theme === 'dark' ? 'bg-industrial-700/50' : 'bg-gray-50'">
+                <span class="text-xs block mb-1" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'">X</span>
+                <span class="text-sm font-mono" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">
+                  {{ selectedRobot.position?.world_x?.toFixed(2) || '-' }}
+                </span>
+              </div>
+              <div class="p-3 rounded-lg transition-colors" :class="theme === 'dark' ? 'bg-industrial-700/50' : 'bg-gray-50'">
+                <span class="text-xs block mb-1" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'">Y</span>
+                <span class="text-sm font-mono" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">
+                  {{ selectedRobot.position?.world_y?.toFixed(2) || '-' }}
+                </span>
+              </div>
+            </div>
           </div>
-          <div class="p-3 rounded-lg transition-colors" :class="theme === 'dark' ? 'bg-industrial-700/50' : 'bg-gray-50'">
-            <span class="text-xs block mb-1" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'">{{ t('fleet.battery') }}</span>
-            <span class="text-sm font-medium" :class="batteryTextClass(selectedRobot.battery)">
-              {{ selectedRobot.battery }}%
-            </span>
-          </div>
-          <div class="p-3 rounded-lg transition-colors" :class="theme === 'dark' ? 'bg-industrial-700/50' : 'bg-gray-50'">
-            <span class="text-xs block mb-1" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'">X</span>
-            <span class="text-sm font-mono" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">
-              {{ selectedRobot.position?.world_x?.toFixed(2) || '-' }}
-            </span>
-          </div>
-          <div class="p-3 rounded-lg transition-colors" :class="theme === 'dark' ? 'bg-industrial-700/50' : 'bg-gray-50'">
-            <span class="text-xs block mb-1" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'">Y</span>
-            <span class="text-sm font-mono" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">
-              {{ selectedRobot.position?.world_y?.toFixed(2) || '-' }}
-            </span>
-          </div>
-          <div class="col-span-2 p-3 rounded-lg transition-colors" :class="theme === 'dark' ? 'bg-industrial-700/50' : 'bg-gray-50'">
-            <span class="text-xs block mb-1" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'">{{ t('fleet.currentTask') }}</span>
-            <span class="text-sm font-medium" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">
-              {{ selectedRobot.current_task || t('common.none') }}
-            </span>
-          </div>
-          <div class="col-span-2 p-3 rounded-lg transition-colors" :class="theme === 'dark' ? 'bg-industrial-700/50' : 'bg-gray-50'">
-            <span class="text-xs block mb-1" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'">{{ t('fleet.lastUpdate') }}</span>
-            <span class="text-sm" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">
-              {{ selectedRobot.last_update || '-' }}
-            </span>
+
+          <!-- 右侧：任务与路由信息 -->
+          <div class="space-y-3">
+            <h3 class="text-xs font-semibold uppercase tracking-wider" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'">{{ t('fleet.currentTask') }}</h3>
+            <div class="p-3 rounded-lg transition-colors" :class="theme === 'dark' ? 'bg-industrial-700/50' : 'bg-gray-50'">
+              <span class="text-xs block mb-1" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'">{{ t('fleet.currentTask') }}</span>
+              <span class="text-sm font-medium" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">
+                {{ selectedRobot.current_task || t('common.none') }}
+              </span>
+            </div>
+            <div class="p-3 rounded-lg transition-colors" :class="theme === 'dark' ? 'bg-industrial-700/50' : 'bg-gray-50'">
+              <span class="text-xs block mb-1" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'">{{ t('fleet.location') }}</span>
+              <span class="text-sm font-medium" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">
+                <template v-if="selectedRobot.location_type === 'waypoint'">
+                  <span class="px-2 py-0.5 rounded-full bg-cyber-green/20 text-cyber-green text-xs font-medium">@{{ selectedRobot.current_waypoint }}</span>
+                </template>
+                <template v-else-if="selectedRobot.location_type === 'segment'">
+                  <span class="px-2 py-0.5 rounded-full bg-cyber-blue/20 text-cyber-blue text-xs font-medium" :title="segmentMotionHint(selectedRobot)">
+                    → {{ selectedRobot.current_segment }}
+                  </span>
+                </template>
+                <template v-else>
+                  <span class="text-xs" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">{{ t('common.unknown') }}</span>
+                </template>
+              </span>
+            </div>
+            <div class="p-3 rounded-lg transition-colors" :class="theme === 'dark' ? 'bg-industrial-700/50' : 'bg-gray-50'">
+              <span class="text-xs block mb-1" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'">{{ t('fleet.lastUpdate') }}</span>
+              <span class="text-sm" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">
+                {{ selectedRobot.last_update || '-' }}
+              </span>
+            </div>
           </div>
         </div>
       </div>

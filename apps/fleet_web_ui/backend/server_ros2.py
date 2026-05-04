@@ -46,6 +46,7 @@ try:
     from rclpy.executors import MultiThreadedExecutor
     from fleet_msgs.msg import RobotStatus, FleetStatus, TaskInfo as TaskInfoMsg
     from fleet_msgs.srv import SubmitTask, CancelTask
+    from std_msgs.msg import String
     HAS_ROS = True
 except ImportError:
     HAS_ROS = False
@@ -263,6 +264,16 @@ class ROSBridgeNode(Node if HAS_ROS else object):
             except ImportError:
                 self.remove_robot_client = None
 
+            # ---- 订阅调度器指标话题 ----
+            self.metrics_sub = self.create_subscription(
+                String, '/fleet_manager/metrics', self.metrics_callback, 10)
+            self.get_logger().info('订阅调度器指标话题: /fleet_manager/metrics')
+
+            # ---- 订阅调度器告警话题 ----
+            self.alerts_sub = self.create_subscription(
+                String, '/fleet_manager/alerts', self.alerts_callback, 10)
+            self.get_logger().info('订阅调度器告警话题: /fleet_manager/alerts')
+
             self.get_logger().info('ROS2 桥接节点启动')
 
     def task_status_callback(self, msg):
@@ -393,6 +404,34 @@ class ROSBridgeNode(Node if HAS_ROS else object):
             self.state.event_loop
         )
 
+    def metrics_callback(self, msg):
+        """调度器指标回调：解析 metrics 字符串并缓存到全局状态。"""
+        metrics_str = msg.data
+        metrics = {}
+        for part in metrics_str.split():
+            if '=' in part:
+                k, v = part.split('=', 1)
+                try:
+                    metrics[k] = int(v)
+                except ValueError:
+                    metrics[k] = v
+        self.state.metrics = metrics
+
+    def alerts_callback(self, msg):
+        """调度器告警回调：转发告警到 WebSocket 并记录日志。"""
+        alert_text = msg.data
+        self.state.add_log("warning", f"调度告警: {alert_text}")
+        self.state.latest_alerts.append({
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "message": alert_text
+        })
+        if len(self.state.latest_alerts) > 100:
+            self.state.latest_alerts.pop(0)
+        asyncio.run_coroutine_threadsafe(
+            self.state.broadcast({'type': 'alert', 'payload': {'message': alert_text}}),
+            self.state.event_loop
+        )
+
 
 # ---- 全局状态管理器 ----
 
@@ -420,6 +459,8 @@ class FleetState:
         self.websocket_clients: List[WebSocket] = []
         self.ros_node: Optional[ROSBridgeNode] = None
         self.event_loop = None
+        self.metrics: Dict[str, int] = {}
+        self.latest_alerts: List[Dict] = []
 
     def world_to_pixel(self, world_x: float, world_y: float) -> tuple:
         """世界坐标转像素坐标。
@@ -1200,6 +1241,62 @@ async def get_logs(limit: int = 100):
     return {"logs": fleet_state.logs[:limit]}
 
 
+@app.get("/api/metrics")
+async def get_metrics():
+    """获取调度器核心指标。"""
+    return {"metrics": fleet_state.metrics}
+
+
+@app.get("/api/alerts")
+async def get_alerts(limit: int = 50):
+    """获取调度器告警列表。"""
+    return {"alerts": fleet_state.latest_alerts[-limit:]}
+
+
+@app.post("/api/map/save")
+async def save_map():
+    """保存当前交通图到文件。调用 fleet_manager 的 ROS2 服务。"""
+    if not fleet_state.ros_connected:
+        raise HTTPException(status_code=503, detail="ROS2未连接")
+
+    map_file = TRAFFIC_MAP_FILE
+    if not map_file:
+        raise HTTPException(status_code=400, detail="未配置交通图文件路径")
+
+    try:
+        from fleet_msgs.srv import SaveTrafficMap
+        if not hasattr(fleet_state.ros_node, 'save_map_client') or fleet_state.ros_node.save_map_client is None:
+            fleet_state.ros_node.save_map_client = fleet_state.ros_node.create_client(
+                SaveTrafficMap, '/fleet_manager/save_traffic_map')
+
+        client = fleet_state.ros_node.save_map_client
+        if not client.wait_for_service(timeout_sec=3.0):
+            raise HTTPException(status_code=503, detail="保存服务未就绪")
+
+        req = SaveTrafficMap.Request()
+        req.file_path = map_file
+
+        import time
+        future = client.call_async(req)
+        start = time.time()
+        while not future.done():
+            if time.time() - start > 10.0:
+                raise HTTPException(status_code=504, detail="保存超时")
+            await asyncio.sleep(0.1)
+
+        resp = future.result()
+        if resp and resp.success:
+            fleet_state.add_log("info", f"交通图已保存: {map_file}")
+            return {"success": True, "message": resp.message}
+        else:
+            msg = getattr(resp, 'message', 'unknown') if resp else 'no response'
+            raise HTTPException(status_code=500, detail=f"保存失败: {msg}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"保存异常: {str(e)}")
+
+
 # ---- WebSocket 接口 ----
 
 @app.websocket("/ws")
@@ -1230,7 +1327,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 "tasks": [v.dict() if hasattr(v, 'dict') else dict(v) for v in fleet_state.tasks.values()],
                 "waypoints": fleet_state.waypoints,
                 "map_data": fleet_state.map_data,
-                "ros_connected": fleet_state.ros_connected
+                "ros_connected": fleet_state.ros_connected,
+                "metrics": fleet_state.metrics,
+                "alerts": fleet_state.latest_alerts
             }
         })
 

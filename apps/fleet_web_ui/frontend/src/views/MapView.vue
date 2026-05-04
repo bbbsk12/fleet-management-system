@@ -6,25 +6,6 @@
         <h1 class="text-xl sm:text-2xl font-bold tracking-wide" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">{{ t('map.title') }}</h1>
         <p class="text-xs sm:text-sm mt-0.5" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-500'">{{ t('map.subtitle') }}</p>
       </div>
-      <div class="flex gap-2">
-        <!-- 加载地图文件按钮 -->
-        <button
-          class="px-3 py-2 rounded-lg border text-sm transition-colors flex items-center gap-2"
-          :class="theme === 'dark' ? 'bg-industrial-700 border-industrial-600 text-gray-300 hover:bg-industrial-600' : 'bg-gray-100 border-gray-200 text-gray-600 hover:bg-gray-200'"
-          @click="loadMapFile"
-        >
-          <FolderOpen class="w-4 h-4" />
-          {{ t('map.loadMap') }}
-        </button>
-        <!-- 刷新位置按钮 -->
-        <button
-          class="px-3 py-2 rounded-lg bg-cyber-blue/20 border border-cyber-blue/40 text-cyber-blue text-sm hover:bg-cyber-blue/30 transition-colors flex items-center gap-2"
-          @click="refreshPositions"
-        >
-          <RotateCcw class="w-4 h-4" />
-          {{ t('map.refreshPositions') }}
-        </button>
-      </div>
     </div>
 
     <!-- 地图 Canvas 容器 -->
@@ -43,6 +24,24 @@
           @touchmove.prevent="onTouchMove"
           @touchend="onTouchEnd"
         ></canvas>
+
+        <!-- 浮动工具栏：加载地图与刷新位置 -->
+        <div class="absolute top-4 left-4 z-30 flex gap-2 bg-black/40 backdrop-blur-md rounded-xl p-2">
+          <button
+            class="px-3 py-2 rounded-lg text-sm transition-colors flex items-center gap-2 text-white/90 hover:bg-white/10"
+            @click="loadMapFile"
+          >
+            <FolderOpen class="w-4 h-4" />
+            {{ t('map.loadMap') }}
+          </button>
+          <button
+            class="px-3 py-2 rounded-lg text-sm transition-colors flex items-center gap-2 text-cyber-blue hover:bg-white/10"
+            @click="refreshPositions"
+          >
+            <RotateCcw class="w-4 h-4" />
+            {{ t('map.refreshPositions') }}
+          </button>
+        </div>
 
         <!-- 航点标记：锚点仅为圆点 32x32；标签绝对定位在下方，避免长文案撑宽容器导致 translate 中心偏移 -->
         <div
@@ -67,6 +66,17 @@
               {{ wp.name || wp.id }}
             </div>
           </div>
+        </div>
+
+        <!-- 链式撤退状态指示器 -->
+        <div v-if="chainActive" class="fixed top-20 right-4 z-40 data-card rounded-xl p-4 neon-border border-cyber-orange/50 animate-pulse max-w-xs">
+          <div class="flex items-center gap-2 mb-2">
+            <RefreshCw class="w-5 h-5 text-cyber-orange animate-spin" />
+            <span class="font-bold" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">{{ t('map.chainActive') }}</span>
+          </div>
+          <p class="text-xs" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">
+            {{ t('map.chainDesc') }}
+          </p>
         </div>
 
         <!-- 机器人标记 -->
@@ -132,40 +142,96 @@
           </div>
         </div>
 
-        <!-- 图例区域 -->
-        <div class="absolute bottom-4 left-4 rounded-lg p-3 border backdrop-blur-sm" :class="theme === 'dark' ? 'bg-industrial-800/90 border-industrial-600' : 'bg-white/90 border-gray-200'">
-          <div class="text-xs mb-2 font-medium" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">{{ t('map.legend') }}</div>
-          <div class="space-y-1.5">
-            <div class="flex items-center gap-2">
-              <div class="w-3 h-3 rounded-full bg-cyber-blue"></div>
-              <span class="text-xs" :class="theme === 'dark' ? 'text-gray-300' : 'text-gray-600'">{{ t('map.robot') }}</span>
+        <!-- 机器人信息浮窗（选中时显示在机器人标记附近） -->
+        <div
+          v-if="selectedRobot"
+          class="absolute z-30 w-72 sm:w-80 bg-black/60 backdrop-blur-xl rounded-xl p-4 border border-white/10 shadow-2xl"
+          :style="{
+            left: Math.min(Math.max(((selectedRobot.position?.x || 0) * scale + offset.x + 30), 10), (mapWrapper?.clientWidth || 400) - 320) + 'px',
+            top: Math.max(((selectedRobot.position?.y || 0) * scale + offset.y - 140), 10) + 'px'
+          }"
+        >
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-base font-bold flex items-center gap-2 text-white">
+              <Bot class="w-4 h-4 text-cyber-blue" />
+              {{ selectedRobot.id }} {{ t('map.robotDetail') }}
+            </h3>
+            <button class="p-1.5 rounded-lg transition-colors hover:bg-white/10 text-gray-400" @click="selectedRobot = null">
+              <X class="w-4 h-4" />
+            </button>
+          </div>
+          <div class="grid grid-cols-2 gap-3 text-sm">
+            <div>
+              <p class="text-xs mb-1 text-gray-400">{{ t('common.status') }}</p>
+              <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium" :class="robotStatusClass(selectedRobot.status)">
+                <span class="w-1.5 h-1.5 rounded-full" :class="robotStatusDotClass(selectedRobot.status)" />
+                {{ statusText(selectedRobot.status) }}
+              </span>
             </div>
-            <div class="flex items-center gap-2">
-              <div class="w-3 h-3 rounded-full bg-gray-500 opacity-60"></div>
-              <span class="text-xs" :class="theme === 'dark' ? 'text-gray-300' : 'text-gray-600'">{{ t('map.offlineRobot', '离线底盘') }}</span>
+            <div>
+              <p class="text-xs mb-1 text-gray-400">{{ t('fleet.battery') }}</p>
+              <div class="flex items-center gap-2">
+                <div class="flex-1 h-1.5 rounded-full overflow-hidden bg-white/10">
+                  <div
+                    class="h-full rounded-full transition-all"
+                    :class="batteryBarClass(selectedRobot.battery)"
+                    :style="{ width: selectedRobot.battery + '%' }"
+                  ></div>
+                </div>
+                <span class="text-xs text-gray-300">{{ selectedRobot.battery }}%</span>
+              </div>
             </div>
-            <div class="flex items-center gap-2">
-              <div class="w-3 h-3 rounded-full bg-cyber-purple"></div>
-              <span class="text-xs" :class="theme === 'dark' ? 'text-gray-300' : 'text-gray-600'">{{ t('map.waypoint') }}</span>
+            <div>
+              <p class="text-xs mb-1 text-gray-400">{{ t('fleet.position') }}</p>
+              <p class="text-xs font-mono text-gray-300">
+                ({{ selectedRobot.position?.x?.toFixed(1) }}, {{ selectedRobot.position?.y?.toFixed(1) }})
+              </p>
             </div>
-            <div class="flex items-center gap-2">
-              <div class="w-3 h-3 rounded-full bg-cyber-green"></div>
-              <span class="text-xs" :class="theme === 'dark' ? 'text-gray-300' : 'text-gray-600'">{{ t('map.chargingStation') }}</span>
+            <div>
+              <p class="text-xs mb-1 text-gray-400">{{ t('fleet.currentTask') }}</p>
+              <p class="text-xs text-gray-300 truncate">{{ selectedRobot.current_task || t('common.none') }}</p>
             </div>
-            <div class="flex items-center gap-2">
-              <div class="w-3 h-3 rounded-full bg-cyber-orange"></div>
-              <span class="text-xs" :class="theme === 'dark' ? 'text-gray-300' : 'text-gray-600'">{{ t('map.parkingSpot') }}</span>
-            </div>
+          </div>
+          <!-- 机器人操作按钮 -->
+          <div class="flex flex-wrap gap-2 mt-3 pt-3 border-t border-white/10">
+            <button class="flex-1 px-3 py-1.5 rounded-lg bg-cyber-blue/20 border border-cyber-blue/40 text-cyber-blue text-xs hover:bg-cyber-blue/30 transition-colors" @click="sendToWaypoint">
+              {{ t('map.sendToWaypoint') }}
+            </button>
+            <button class="flex-1 px-3 py-1.5 rounded-lg bg-cyber-green/20 border border-cyber-green/40 text-cyber-green text-xs hover:bg-cyber-green/30 transition-colors" @click="returnToCharge">
+              {{ t('map.returnToCharge') }}
+            </button>
+            <button class="px-3 py-1.5 rounded-lg bg-cyber-red/20 border border-cyber-red/40 text-cyber-red text-xs hover:bg-cyber-red/30 transition-colors" @click="stopRobot">
+              {{ t('map.emergencyStop') }}
+            </button>
           </div>
         </div>
 
-        <!-- 缩放控制按钮 -->
-        <div class="absolute bottom-4 right-4 flex flex-col items-center gap-1 rounded-lg p-2 border backdrop-blur-sm" :class="theme === 'dark' ? 'bg-industrial-800/90 border-industrial-600' : 'bg-white/90 border-gray-200'">
-          <button class="w-8 h-8 rounded flex items-center justify-center transition-colors" :class="theme === 'dark' ? 'bg-industrial-700 hover:bg-industrial-600 text-white' : 'bg-gray-100 hover:bg-gray-200 text-gray-600'" @click="zoomIn">
+        <!-- 图例 + 缩放比例尺（左下角） -->
+        <div class="absolute bottom-4 left-4 z-30 flex flex-col gap-1.5">
+          <div class="flex flex-wrap gap-x-3 gap-y-1 bg-black/40 backdrop-blur-md rounded-lg px-3 py-2 text-xs text-white/90">
+            <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-cyber-blue"></span>{{ t('map.robot') }}</span>
+            <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-gray-500 opacity-60"></span>{{ t('map.offlineRobot', '离线底盘') }}</span>
+            <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-cyber-purple"></span>{{ t('map.waypoint') }}</span>
+            <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-cyber-green"></span>{{ t('map.chargingStation') }}</span>
+            <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-cyber-orange"></span>{{ t('map.parkingSpot') }}</span>
+          </div>
+          <div class="bg-black/40 backdrop-blur-md rounded-lg px-3 py-1 text-xs text-white/60 font-mono w-fit">
+            {{ Math.round(scale * 100) }}%
+          </div>
+        </div>
+
+        <!-- 缩放控制按钮（右下角） -->
+        <div class="absolute bottom-4 right-4 z-30 flex flex-col gap-1">
+          <button
+            class="w-9 h-9 rounded-lg bg-black/40 backdrop-blur-md flex items-center justify-center text-white hover:bg-white/20 transition-colors"
+            @click="zoomIn"
+          >
             <Plus class="w-4 h-4" />
           </button>
-          <span class="text-xs py-1" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">{{ Math.round(scale * 100) }}%</span>
-          <button class="w-8 h-8 rounded flex items-center justify-center transition-colors" :class="theme === 'dark' ? 'bg-industrial-700 hover:bg-industrial-600 text-white' : 'bg-gray-100 hover:bg-gray-200 text-gray-600'" @click="zoomOut">
+          <button
+            class="w-9 h-9 rounded-lg bg-black/40 backdrop-blur-md flex items-center justify-center text-white hover:bg-white/20 transition-colors"
+            @click="zoomOut"
+          >
             <Minus class="w-4 h-4" />
           </button>
         </div>
@@ -174,65 +240,8 @@
 
     <!-- 底部信息面板网格 -->
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-      <!-- 选中机器人的详情面板 -->
-      <div v-if="selectedRobot" class="data-card rounded-xl p-4 sm:p-6 neon-border">
-        <div class="flex items-center justify-between mb-4">
-          <h3 class="text-lg font-bold flex items-center gap-2" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">
-            <Bot class="w-5 h-5 text-cyber-blue" />
-            {{ selectedRobot.id }} {{ t('map.robotDetail') }}
-          </h3>
-          <button class="p-2 rounded-lg transition-colors" :class="theme === 'dark' ? 'hover:bg-industrial-700 text-gray-400' : 'hover:bg-gray-100 text-gray-500'" @click="selectedRobot = null">
-            <X class="w-4 h-4" />
-          </button>
-        </div>
-        <div class="grid grid-cols-2 gap-4">
-          <div>
-            <p class="text-xs mb-1" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'">{{ t('common.status') }}</p>
-            <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium" :class="robotStatusClass(selectedRobot.status)">
-              <span class="w-1.5 h-1.5 rounded-full" :class="robotStatusDotClass(selectedRobot.status)" />
-              {{ statusText(selectedRobot.status) }}
-            </span>
-          </div>
-          <div>
-            <p class="text-xs mb-1" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'">{{ t('fleet.battery') }}</p>
-            <div class="flex items-center gap-2">
-              <div class="flex-1 h-2 rounded-full overflow-hidden" :class="theme === 'dark' ? 'bg-industrial-700' : 'bg-gray-200'">
-                <div
-                  class="h-full rounded-full transition-all"
-                  :class="batteryBarClass(selectedRobot.battery)"
-                  :style="{ width: selectedRobot.battery + '%' }"
-                ></div>
-              </div>
-              <span class="text-sm" :class="theme === 'dark' ? 'text-gray-300' : 'text-gray-600'">{{ selectedRobot.battery }}%</span>
-            </div>
-          </div>
-          <div>
-            <p class="text-xs mb-1" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'">{{ t('fleet.position') }}</p>
-            <p class="text-sm font-mono" :class="theme === 'dark' ? 'text-gray-300' : 'text-gray-600'">
-              ({{ selectedRobot.position?.x?.toFixed(1) }}, {{ selectedRobot.position?.y?.toFixed(1) }})
-            </p>
-          </div>
-          <div>
-            <p class="text-xs mb-1" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'">{{ t('fleet.currentTask') }}</p>
-            <p class="text-sm" :class="theme === 'dark' ? 'text-gray-300' : 'text-gray-600'">{{ selectedRobot.current_task || t('common.none') }}</p>
-          </div>
-        </div>
-        <!-- 机器人操作按钮 -->
-        <div class="flex flex-wrap gap-2 mt-4 pt-4 border-t" :class="theme === 'dark' ? 'border-industrial-700' : 'border-gray-200'">
-          <button class="px-3 py-2 rounded-lg bg-cyber-blue/20 border border-cyber-blue/40 text-cyber-blue text-sm hover:bg-cyber-blue/30 transition-colors" @click="sendToWaypoint">
-            {{ t('map.sendToWaypoint') }}
-          </button>
-          <button class="px-3 py-2 rounded-lg bg-cyber-green/20 border border-cyber-green/40 text-cyber-green text-sm hover:bg-cyber-green/30 transition-colors" @click="returnToCharge">
-            {{ t('map.returnToCharge') }}
-          </button>
-          <button class="px-3 py-2 rounded-lg bg-cyber-red/20 border border-cyber-red/40 text-cyber-red text-sm hover:bg-cyber-red/30 transition-colors" @click="stopRobot">
-            {{ t('map.emergencyStop') }}
-          </button>
-        </div>
-      </div>
-
-      <!-- 选中航点的详情面板 -->
-      <div v-else-if="selectedWaypoint" class="data-card rounded-xl p-4 sm:p-6 neon-border">
+      <!-- 左侧面板：选中航点的详情 或 机器人列表 -->
+      <div v-if="selectedWaypoint" class="data-card rounded-xl p-4 sm:p-6 neon-border">
         <div class="flex items-center justify-between mb-4">
           <h3 class="text-lg font-bold flex items-center gap-2" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">
             <MapPin class="w-5 h-5 text-cyber-purple" />
@@ -272,13 +281,21 @@
         </div>
       </div>
 
-      <!-- 机器人列表面板（默认显示） -->
-      <div v-else class="data-card rounded-xl p-4 sm:p-6 neon-border">
-        <h3 class="text-lg font-bold mb-4 flex items-center gap-2" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">
-          <Bot class="w-5 h-5 text-cyber-blue" />
-          {{ t('map.robotList') }}
-        </h3>
-        <div class="space-y-2 max-h-48 overflow-y-auto">
+      <!-- 机器人列表面板（可折叠） -->
+      <details v-else class="data-card rounded-xl p-4 sm:p-6 neon-border group" open>
+        <summary class="flex items-center justify-between cursor-pointer list-none [&::-webkit-details-marker]:hidden [&::marker]:hidden">
+          <h3 class="text-lg font-bold flex items-center gap-2" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">
+            <Bot class="w-5 h-5 text-cyber-blue" />
+            {{ t('map.robotList') }}
+          </h3>
+          <div class="flex items-center gap-2">
+            <span class="text-xs px-2 py-0.5 rounded-full bg-cyber-blue/20 text-cyber-blue">{{ robotList.length }}</span>
+            <svg class="w-4 h-4 transition-transform group-open:rotate-180" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="6 9 12 15 18 9"></polyline>
+            </svg>
+          </div>
+        </summary>
+        <div class="mt-4 space-y-2 max-h-48 overflow-y-auto">
           <div
             v-for="robot in robotList"
             :key="robot.id"
@@ -304,15 +321,23 @@
             </div>
           </div>
         </div>
-      </div>
+      </details>
 
-      <!-- 航点列表面板 -->
-      <div class="data-card rounded-xl p-4 sm:p-6 neon-border">
-        <h3 class="text-lg font-bold mb-4 flex items-center gap-2" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">
-          <MapPin class="w-5 h-5 text-cyber-purple" />
-          {{ t('map.waypointList') }}
-        </h3>
-        <div class="space-y-2 max-h-48 overflow-y-auto">
+      <!-- 航点列表面板（可折叠） -->
+      <details class="data-card rounded-xl p-4 sm:p-6 neon-border group" open>
+        <summary class="flex items-center justify-between cursor-pointer list-none [&::-webkit-details-marker]:hidden [&::marker]:hidden">
+          <h3 class="text-lg font-bold flex items-center gap-2" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">
+            <MapPin class="w-5 h-5 text-cyber-purple" />
+            {{ t('map.waypointList') }}
+          </h3>
+          <div class="flex items-center gap-2">
+            <span class="text-xs px-2 py-0.5 rounded-full bg-cyber-purple/20 text-cyber-purple">{{ waypoints.length }}</span>
+            <svg class="w-4 h-4 transition-transform group-open:rotate-180" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="6 9 12 15 18 9"></polyline>
+            </svg>
+          </div>
+        </summary>
+        <div class="mt-4 space-y-2 max-h-48 overflow-y-auto">
           <div
             v-for="wp in waypoints"
             :key="wp.id"
@@ -323,7 +348,7 @@
             @click="selectWaypoint(wp)"
           >
             <div
-              class="w-8 h-8 rounded-full flex items-center justify-center"
+              class="w-8 h-8 rounded-full flex items-center justify-center shrink-0"
               :class="getWaypointBgClass(wp)"
             >
               <component :is="getWaypointIcon(wp)" class="w-4 h-4 text-white" />
@@ -334,7 +359,7 @@
             </div>
           </div>
         </div>
-      </div>
+      </details>
     </div>
 
     <!-- 创建任务弹窗 -->
@@ -348,39 +373,68 @@
         </div>
 
         <!-- 目标航点信息 -->
-        <p class="mb-4" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">
-          {{ t('map.targetWaypoint') }}: <span class="text-cyber-purple font-medium">{{ selectedWaypoint?.name || selectedWaypoint?.id }}</span>
-        </p>
+        <div class="mb-5 p-3 rounded-lg border" :class="theme === 'dark' ? 'bg-cyber-purple/10 border-cyber-purple/30' : 'bg-purple-50 border-purple-200'">
+          <p class="text-xs mb-1" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">{{ t('map.targetWaypoint') }}</p>
+          <p class="text-base font-semibold text-cyber-purple">{{ selectedWaypoint?.name || selectedWaypoint?.id }}</p>
+          <p v-if="selectedWaypoint" class="text-xs font-mono mt-1" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'">
+            ({{ selectedWaypoint.x?.toFixed(1) }}, {{ selectedWaypoint.y?.toFixed(1) }})
+          </p>
+        </div>
 
         <!-- 可选机器人列表 -->
-        <div class="space-y-2 max-h-64 overflow-y-auto mb-4">
+        <label class="block text-sm mb-3 font-medium" :class="theme === 'dark' ? 'text-gray-300' : 'text-gray-700'">{{ t('tasks.selectRobot') }}</label>
+        <div class="space-y-3 max-h-64 overflow-y-auto mb-5">
           <div
             v-for="robot in availableRobots"
             :key="robot.id"
-            class="p-3 rounded-lg border cursor-pointer transition-all"
+            class="p-4 rounded-xl border-2 cursor-pointer transition-all"
             :class="taskRobot === robot.id
-              ? 'border-cyber-blue bg-cyber-blue/10'
+              ? 'border-cyber-blue bg-cyber-blue/10 ring-2 ring-cyber-blue/20'
               : (theme === 'dark' ? 'border-industrial-600 bg-industrial-700/50 hover:border-industrial-500' : 'border-gray-200 bg-gray-50 hover:border-gray-300')"
             @click="taskRobot = robot.id"
           >
             <div class="flex items-center justify-between">
-              <span class="font-medium" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">{{ robot.id }}</span>
-              <span class="text-xs flex items-center gap-1">
-                <Battery class="w-3 h-3" :class="getBatteryIconClass(robot.battery)" />
-                <span :class="getBatteryTextClass(robot.battery)">{{ robot.battery }}%</span>
-              </span>
+              <div class="flex items-center gap-3">
+                <div class="flex items-center justify-center w-10 h-10 rounded-full" :class="taskRobot === robot.id ? 'bg-cyber-blue/20' : (theme === 'dark' ? 'bg-industrial-600' : 'bg-gray-200')">
+                  <Bot class="w-5 h-5" :class="taskRobot === robot.id ? 'text-cyber-blue' : (theme === 'dark' ? 'text-gray-400' : 'text-gray-500')" />
+                </div>
+                <div>
+                  <span class="font-medium" :class="theme === 'dark' ? 'text-white' : 'text-gray-900'">{{ robot.id }}</span>
+                  <div class="flex items-center gap-2 mt-1 text-xs" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">
+                    <span class="flex items-center gap-1">
+                      <Battery class="w-3 h-3" :class="getBatteryIconClass(robot.battery)" />
+                      {{ robot.battery }}%
+                    </span>
+                    <span>{{ statusText(robot.status) }}</span>
+                  </div>
+                </div>
+              </div>
+              <!-- 选中标记 -->
+              <div v-if="taskRobot === robot.id" class="w-6 h-6 rounded-full bg-cyber-blue flex items-center justify-center">
+                <svg class="w-3.5 h-3.5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
+              </div>
+            </div>
+            <!-- 电量条 -->
+            <div class="mt-3 h-1.5 rounded-full overflow-hidden" :class="theme === 'dark' ? 'bg-industrial-700' : 'bg-gray-200'">
+              <div
+                class="h-full rounded-full transition-all"
+                :class="robot.battery > 60 ? 'bg-cyber-green' : robot.battery > 20 ? 'bg-cyber-orange' : 'bg-cyber-red'"
+                :style="{ width: robot.battery + '%' }"
+              ></div>
             </div>
           </div>
         </div>
 
         <!-- 任务类型选择 -->
         <div class="mb-4">
-          <label class="block text-sm mb-2" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">{{ t('tasks.taskType') }}</label>
+          <label class="block text-sm mb-2 font-medium" :class="theme === 'dark' ? 'text-gray-300' : 'text-gray-700'">{{ t('tasks.taskType') }}</label>
           <div class="grid grid-cols-2 gap-2">
             <button
               v-for="tt in taskTypeOptions"
               :key="tt.value"
-              class="py-2 rounded-lg text-sm font-medium transition-all"
+              class="py-3 rounded-lg text-sm font-medium transition-all"
               :class="taskType === tt.value
                 ? 'bg-cyber-blue/20 border border-cyber-blue/40 text-cyber-blue'
                 : (theme === 'dark' ? 'bg-industrial-700 border border-industrial-600 text-gray-400' : 'bg-gray-100 border border-gray-200 text-gray-500')"
@@ -393,7 +447,7 @@
 
         <!-- 站点编码输入（巡航类型时隐藏） -->
         <div v-if="taskType !== 1" class="mb-4">
-          <label class="block text-sm mb-2" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">{{ t('tasks.siteCode') }}</label>
+          <label class="block text-sm mb-2 font-medium" :class="theme === 'dark' ? 'text-gray-300' : 'text-gray-700'">{{ t('tasks.siteCode') }}</label>
           <input
             v-model.number="taskSiteCode"
             type="number"
@@ -405,16 +459,16 @@
         </div>
 
         <!-- 操作按钮 -->
-        <div class="flex gap-3">
+        <div class="flex gap-3 pt-2">
           <button
-            class="flex-1 px-4 py-2.5 rounded-lg border transition-colors"
+            class="flex-1 px-5 py-3 rounded-xl border transition-colors font-medium"
             :class="theme === 'dark' ? 'bg-industrial-700 border-industrial-600 text-gray-300 hover:bg-industrial-600' : 'bg-gray-100 border-gray-200 text-gray-600 hover:bg-gray-200'"
             @click="showTaskModal = false"
           >
             {{ t('common.cancel') }}
           </button>
           <button
-            class="flex-1 px-4 py-2.5 rounded-lg bg-cyber-blue/20 border border-cyber-blue/40 text-cyber-blue hover:bg-cyber-blue/30 transition-colors font-medium"
+            class="flex-1 px-5 py-3 rounded-xl bg-cyber-blue/20 border border-cyber-blue/40 text-cyber-blue hover:bg-cyber-blue/30 transition-colors font-medium"
             @click="confirmTask"
           >
             {{ t('map.confirmDispatch') }}
@@ -433,7 +487,7 @@ import { useSettingsStore } from '../stores/settings'
 import axios from 'axios'
 import {
   Bot, MapPin, Battery, X, FolderOpen, RotateCcw, Plus, Minus,
-  Zap, Car
+  Zap, Car, RefreshCw
 } from 'lucide-vue-next'
 
 const fleetStore = useFleetStore()
@@ -475,6 +529,13 @@ const robotList = computed(() => {
 const robotMarkers = computed(() => {
   // 显示所有有位姿的机器人（包括 offline，用最后已知位姿）
   return robotList.value.filter(r => r.position)
+})
+
+// 链式撤退状态检测：检查是否有机器人处于链式撤退或避让任务中
+const chainActive = computed(() => {
+  return robotList.value.some(r =>
+    r.current_task && (String(r.current_task).startsWith('chain_retreat_') || String(r.current_task).startsWith('avoidance_'))
+  )
 })
 
 // 可用于派遣任务的机器人（在线且空闲）
