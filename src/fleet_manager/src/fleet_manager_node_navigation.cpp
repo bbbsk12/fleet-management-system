@@ -174,6 +174,8 @@ bool FleetManagerNode::start_navigation(
     "path=" + join_waypoints(path), __FILE__, __LINE__, __func__);
 
   scheduler_->mark_task_navigating(task_id);
+  fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(task_id);
+  if (!ti.task_id.empty()) task_pub_->publish(ti);
   navigate_to_next_waypoint(robot_id);
   return true;
 }
