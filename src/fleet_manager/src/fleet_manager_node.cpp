@@ -415,6 +415,22 @@ void FleetManagerNode::assign_pending_tasks()
     auto st = robots_.find(rid);
     if (st == robots_.end() || st->second.connection_status != "online") continue;
 
+    // 重试周期耗尽 → 失败任务，防止无限循环
+    if (scheduler_->would_exceed_retry_cycles(t.task_id, max_task_retry_cycles_)) {
+      PersistLogger::log_error("sched.redispatch_exhausted", rid, t.task_id,
+        "max retry cycles exceeded for waiting_fleet task, failing",
+        __FILE__, __LINE__, __func__);
+      scheduler_->fail_task(t.task_id, "max retry cycles exceeded");
+      fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(t.task_id);
+      if (!ti.task_id.empty()) task_pub_->publish(ti);
+      occupancy_->release_reservations(rid);
+      ni->current_task_id.clear();
+      ni->route.clear();
+      ni->route_index = 0;
+      ni->retry_count = 0;
+      continue;
+    }
+
     PersistLogger::log_info("sched.redispatch_waiting", rid, t.task_id,
       "retrying deferred task to wp=" + t.waypoint_id,
       __FILE__, __LINE__, __func__);

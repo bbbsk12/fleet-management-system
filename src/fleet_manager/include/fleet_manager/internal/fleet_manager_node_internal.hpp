@@ -18,7 +18,9 @@ namespace fleet_manager
 /// 判断是否为内部协调任务的 task_id(避让/链撤退/自动驶离)
 inline bool is_internal_task_id(const std::string & task_id)
 {
-  return task_id.rfind("avoidance_", 0) == 0;
+  return task_id.rfind("avoidance_", 0) == 0 ||
+         task_id.rfind("chain_retreat_", 0) == 0 ||
+         task_id.rfind("relocate_", 0) == 0;
 }
 
 /// 将航点 ID 列表拼接为可读字符串: "wp_001->wp_002->...->wp_N"

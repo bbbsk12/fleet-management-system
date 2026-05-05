@@ -229,6 +229,7 @@ void TaskScheduler::mark_task_waiting(const std::string & task_id)
   auto it = all_.find(task_id);
   if (it == all_.end() || is_finished(it->second.status)) return;
   it->second.status = "waiting_fleet";
+  retry_cycle_count_[task_id]++;  // 每次进入 waiting_fleet 累加重试计数
 }
 
 void TaskScheduler::mark_task_pending(const std::string & task_id)

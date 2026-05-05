@@ -229,6 +229,13 @@ private:
   bool is_mutual_block(const std::string & blocker, const std::string & blocker_wp,
                        const std::string & requester, const std::string & requester_wp) const;
 
+  /// 递归推占据者: 把 wp 上的机器人推到分支空闲航点(最多4层)
+  bool try_push_occupant(const std::string & wp,
+                         const std::set<std::string> & excluded,
+                         std::set<std::string> & visited,
+                         int depth,
+                         std::vector<RetreatChainStep> & steps);
+
   /// 递归构建撤退链(深度限制5层)，成功时链步骤写入 chain_plan_
   bool try_build_retreat_chain(const std::string & requester, const std::string & from_wp,
                                const std::string & to_wp, const std::string & blocker,

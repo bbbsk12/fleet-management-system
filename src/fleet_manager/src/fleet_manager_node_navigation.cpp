@@ -115,11 +115,12 @@ bool FleetManagerNode::start_navigation(
   path = clean;
   if (path.empty()) path.push_back(target_wp);
 
-  // 检查首跳是否畅通
+  // 检查首跳是否被阻塞。离线阻塞者立即失败；在线阻塞者不在此放弃，
+  // 而是跳过预留步骤，交给 navigate_to_next_waypoint 做协调（链式撤退/简单避让）。
+  bool first_hop_blocked_by_online = false;
   if (path.size() >= 2) {
     std::string blocker = occupancy_->can_enter(robot_id, path[0], path[1]);
     if (!blocker.empty()) {
-      // 被离线底盘阻塞 → 直接失败任务
       auto bs = robots_.find(blocker);
       if (bs == robots_.end() || bs->second.connection_status != "online") {
         scheduler_->fail_task(task_id, "blocked by offline robot " + blocker);
@@ -127,19 +128,17 @@ bool FleetManagerNode::start_navigation(
         task_pub_->publish(ti);
         return false;
       }
-
-      // 在线阻塞 → 退避重试
-      ni->retry_count++;
-      double jitter = 0.7 + 0.6 * (static_cast<double>(std::hash<std::string>{}(robot_id) % 1000) / 1000.0);
-      double backoff = jitter * retry_base_ * std::pow(1.5, std::min(ni->retry_count, retry_max_));
-      ni->retry_after = now + rclcpp::Duration::from_seconds(backoff);
-      scheduler_->mark_task_waiting(task_id);
-      return false;
+      // 在线阻塞者：标记后跳过预留，交给 navigate_to_next_waypoint 处理协调
+      first_hop_blocked_by_online = true;
+      PersistLogger::log_info("nav.first_hop_blocked_online", robot_id, task_id,
+        "first hop " + path[0] + "->" + path[1] + " blocked by online " + blocker +
+        ", delegating coordination to navigate_to_next_waypoint",
+        __FILE__, __LINE__, __func__);
     }
   }
 
-  // 预留首跳
-  if (path.size() >= 2) {
+  // 预留首跳（首跳被在线阻塞时跳过，留给 navigate_to_next_waypoint 在协调后预留）
+  if (!first_hop_blocked_by_online && path.size() >= 2) {
     if (!occupancy_->reserve_next(robot_id, path[0], path[1])) {
       ni->retry_count++;
       double jitter = 0.7 + 0.6 * (static_cast<double>(std::hash<std::string>{}(robot_id) % 1000) / 1000.0);
@@ -148,7 +147,7 @@ bool FleetManagerNode::start_navigation(
       scheduler_->mark_task_waiting(task_id);
       return false;
     }
-  } else {
+  } else if (!first_hop_blocked_by_online && path.size() <= 1) {
     // 单航点路径: 验证目标 zone 可用
     std::string wp = path[0];
     std::string blocker = occupancy_->waypoint_blocker(robot_id, wp);
@@ -230,12 +229,27 @@ void FleetManagerNode::navigate_to_next_waypoint(const std::string & robot_id)
       ni->retry_after = this->now() + rclcpp::Duration::from_seconds(backoff);
 
       // ── 阻塞协调(触发条件: 已重试 ≥ 2 次 且 非内部任务) ──
+      PersistLogger::log_info("nav.coord_check", robot_id, ni->current_task_id,
+        "retry_count=" + std::to_string(ni->retry_count) +
+        " is_internal=" + std::string(is_internal_task_id(ni->current_task_id) ? "true" : "false"),
+        __FILE__, __LINE__, __func__);
       if (ni->retry_count >= 2 && !is_internal_task_id(ni->current_task_id)) {
         auto blocker_ni = get_or_create_nav(blocker);
         auto blocker_st = robots_.find(blocker);
         bool blocker_online = blocker_st != robots_.end() &&
           blocker_st->second.connection_status == "online";
         bool blocker_stationary = blocker_ni && is_robot_stationary(blocker);
+
+        if (!blocker_online) {
+          PersistLogger::log_warn("nav.blocker_offline", robot_id, ni->current_task_id,
+            "blocker " + blocker + " is offline, cannot coordinate",
+            __FILE__, __LINE__, __func__);
+        } else if (!blocker_stationary) {
+          PersistLogger::log_info("nav.blocker_not_stationary", robot_id, ni->current_task_id,
+            "blocker " + blocker + " is not stationary (has_active_goal=" +
+            std::to_string(blocker_ni ? blocker_ni->has_active_goal : false) + ")",
+            __FILE__, __LINE__, __func__);
+        }
 
         if (blocker_stationary && blocker_online) {
           bool mutual = is_mutual_block(blocker, wp, robot_id, from);
@@ -304,14 +318,44 @@ void FleetManagerNode::navigate_to_next_waypoint(const std::string & robot_id)
               chain_plan_.steps.clear();
               chain_plan_.saved_task_ids.clear();
               chain_plan_.saved_targets.clear();
+            } else {
+              // try_build_retreat_chain 或验证失败
+              chain_plan_.steps.clear();
+              chain_plan_.saved_task_ids.clear();
+              chain_plan_.saved_targets.clear();
+              PersistLogger::log_warn("nav.chain_build_failed", robot_id, ni->current_task_id,
+                "could not build retreat chain from " + from + " to " + wp +
+                " blocked by " + blocker,
+                __FILE__, __LINE__, __func__);
             }
           }
 
-          // 简单避让(仅适用于完全空闲的阻塞者)
+          // 简单避让(适用于空闲阻塞者; 链成功时已在上面 return，不会到这里)
           bool blocker_truly_idle = blocker_ni &&
             blocker_ni->current_task_id.empty() && blocker_ni->route.empty();
-          if (!mutual && blocker_truly_idle) {
-            std::string avoid_wp = occupancy_->find_nearest_free_waypoint(wp);
+          if (blocker_truly_idle) {
+            // 图拓扑感知搜索: 找空闲航点且路径不穿过请求者路径
+            std::string avoid_wp;
+            double avoid_best_dist = std::numeric_limits<double>::max();
+            auto wp_pose = traffic_->get_waypoint_pose(wp);
+            auto all_wps = traffic_->get_all_waypoint_poses();
+            std::set<std::string> exclude_set(ni->route.begin(), ni->route.end());
+
+            for (const auto & [cand_id, cand_pose] : all_wps) {
+              if (cand_id == wp || exclude_set.count(cand_id)) continue;
+              if (!occupancy_->is_zone_free_for("", cand_id)) continue;
+              // 验证路径不穿过请求者的航点（跳过阻塞者当前位置 wp，它必然在路径起点）
+              auto cand_path = traffic_->find_path(wp, cand_id);
+              bool blocked_path = false;
+              for (const auto & pw : cand_path) {
+                if (pw == wp) continue;  // 跳过起点
+                if (exclude_set.count(pw)) { blocked_path = true; break; }
+              }
+              if (blocked_path) continue;
+              double d = std::hypot(cand_pose.position.x - wp_pose.position.x,
+                                    cand_pose.position.y - wp_pose.position.y);
+              if (d < avoid_best_dist) { avoid_best_dist = d; avoid_wp = cand_id; }
+            }
             if (!avoid_wp.empty() && avoid_wp != wp) {
               PersistLogger::log_info("nav.avoid_idle_blocker", robot_id, ni->current_task_id,
                 "asking idle blocker " + blocker + " to move from " + wp + " to " + avoid_wp,
@@ -392,20 +436,12 @@ void FleetManagerNode::navigate_to_waypoint(
   goal.header.frame_id = "map";
   goal.header.stamp = now;
   goal.pose.position = wp_pose.position;
-
-  // 方向: 非最终航点时朝向下一航点
-  if (!is_final && ni->route.size() > ni->route_index + 1) {
-    auto next_pose = traffic_->get_waypoint_pose(ni->route[ni->route_index + 1]);
-    double yaw = std::atan2(
-      next_pose.position.y - wp_pose.position.y,
-      next_pose.position.x - wp_pose.position.x);
-    tf2::Quaternion q; q.setRPY(0, 0, yaw);
-    goal.pose.orientation.x = q.x();
-    goal.pose.orientation.y = q.y();
-    goal.pose.orientation.z = q.z();
-    goal.pose.orientation.w = q.w();
+  // 用底盘当前方向作为目标方向，避免到达后因 orientation 不匹配而震荡
+  auto rst = robots_.find(robot_id);
+  if (rst != robots_.end()) {
+    goal.pose.orientation = rst->second.current_pose.orientation;
   } else {
-    goal.pose.orientation = wp_pose.orientation;
+    goal.pose.orientation.w = 1.0;
   }
 
   auto goal_msg = NavigateToPose::Goal();
@@ -441,8 +477,8 @@ void FleetManagerNode::navigate_to_waypoint(
 
       if (r.code == rclcpp_action::ResultCode::SUCCEEDED) {
         n->retry_count = 0;
-        // 链步骤完成 → 走链回调
-        if (chain_plan_.active && task_id.rfind(kChainTaskPrefix, 0) == 0) {
+        // 链步骤完成 → 走链回调(仅最终航点 reached 时触发)
+        if (is_final && chain_plan_.active && task_id.rfind(kChainTaskPrefix, 0) == 0) {
           on_chain_step_complete(robot_id, true);
           return;
         }
@@ -562,8 +598,24 @@ void FleetManagerNode::check_arrivals()
 
     // 跳过内部任务(链/避让/驶离), 它们有独立的生命周期管理
     if (!ni->current_task_id.empty() && is_internal_task_id(ni->current_task_id)) continue;
-    if (ni->current_task_id.rfind(kChainTaskPrefix, 0) == 0) continue;
-    if (ni->current_task_id.rfind("relocate_", 0) == 0) continue;
+
+    // === 位置到达检测: 物理位置在目标航点半径内 → 直接完成(不等 Nav2 orientation) ===
+    auto st = robots_.find(rid);
+    if (st != robots_.end()) {
+      std::string target_wp = ni->route.back();
+      auto target_pose = traffic_->get_waypoint_pose(target_wp);
+      double dx = st->second.current_pose.position.x - target_pose.position.x;
+      double dy = st->second.current_pose.position.y - target_pose.position.y;
+      if (std::hypot(dx, dy) <= waypoint_radius_) {
+        PersistLogger::log_info("nav.position_arrived", rid, ni->current_task_id,
+          "physically at " + target_wp + ", completing navigation",
+          __FILE__, __LINE__, __func__);
+        cancel_goals(ni);
+        ni->has_active_goal = false;
+        on_nav_succeeded(rid, ni->current_task_id);
+        continue;
+      }
+    }
 
     // 卡住超时: 取消并重试(最多 3 次), 超限回队
     if (ni->nav_since.nanoseconds() > 0 && nav_stuck_timeout_ > 0 &&
@@ -780,7 +832,7 @@ bool FleetManagerNode::is_robot_executing(const std::string & robot_id) const
 // ============================================================================
 
 void FleetManagerNode::finalize_task_completion(
-  const std::string & robot_id, const std::string & /*task_id*/)
+  const std::string & robot_id, const std::string & task_id)
 {
   auto ni = get_or_create_nav(robot_id);
   if (!ni) return;
@@ -794,29 +846,7 @@ void FleetManagerNode::finalize_task_completion(
   ni->chassis_handshake_ok = false;
   ni->chassis_retries = 0;
 
-  // 死胡同自动驶离: 防止 idle 底盘永久堵住单出口航点
-  auto st = robots_.find(robot_id);
-  if (st == robots_.end() || st->second.connection_status != "online") return;
-
-  std::string current_wp = st->second.current_waypoint;
-  if (current_wp.empty())
-    current_wp = traffic_->find_nearest_waypoint(st->second.current_pose);
-
-  auto conns = traffic_->get_waypoint_connections(current_wp);
-  if (conns.size() <= 1 && !conns.empty()) {
-    std::string exit_wp = conns[0];
-    if (occupancy_->waypoint_blocker(robot_id, exit_wp).empty()) {
-      PersistLogger::log_info("nav.auto_relocate", robot_id, "",
-        "relocating from dead-end " + current_wp + " to " + exit_wp,
-        __FILE__, __LINE__, __func__);
-      ni->route = {exit_wp};
-      ni->route_index = 0;
-      ni->current_task_id = "relocate_" + robot_id;
-      ni->retry_count = 0;
-      ni->retry_after = rclcpp::Time{};
-      navigate_to_waypoint(robot_id, exit_wp, ni->current_task_id, true);
-    }
-  }
+  // auto_relocate 已移除：机器人完成任务后留在目标航点，不自动驶离
 }
 
 uint16_t FleetManagerNode::wp_to_u16(const std::string & wp_id) const
@@ -991,6 +1021,58 @@ bool FleetManagerNode::is_mutual_block(
   return true;  // 全堵塞 → 互锁
 }
 
+// ============================================================================
+// 递归推占据者: 尝试把 wp 上的机器人推到其分支空闲航点。
+// 如果所有分支都被占据，递归推分支上的占据者。
+// 返回 true 时 steps 中包含从内到外的推让步骤。
+// ============================================================================
+
+bool FleetManagerNode::try_push_occupant(
+  const std::string & wp,
+  const std::set<std::string> & excluded,
+  std::set<std::string> & visited,
+  int depth,
+  std::vector<RetreatChainStep> & steps)
+{
+  if (depth >= 4) return false;
+
+  auto holder = occupancy_->get_zone_holder(wp);
+  if (holder.empty()) return true;
+  if (!is_robot_stationary(holder)) return false;
+  // 顶层(非递归)检查已访问机器人防环路
+  if (depth == 0 && visited.count(holder)) return false;
+  visited.insert(holder);
+
+  auto conns = traffic_->get_waypoint_connections(wp);
+  for (const auto & hc : conns) {
+    if (excluded.count(hc)) continue;
+
+    auto hc_holder = occupancy_->get_zone_holder(hc);
+    if (hc_holder.empty() || hc_holder == holder) {
+      steps.push_back({holder, hc});
+      PersistLogger::log_info("nav.push_occupant", holder, "",
+        "pushing " + holder + " from " + wp + " to " + hc + " depth=" + std::to_string(depth),
+        __FILE__, __LINE__, __func__);
+      return true;
+    }
+
+    // 递归推占据者(用深度限制防无限递归,允许跨层 swap: A→B, B→A)
+    if (is_robot_stationary(hc_holder)) {
+      std::vector<RetreatChainStep> sub_steps;
+      if (try_push_occupant(hc, excluded, visited, depth + 1, sub_steps)) {
+        for (auto & s : sub_steps) steps.push_back(std::move(s));
+        steps.push_back({holder, hc});
+        PersistLogger::log_info("nav.push_occupant", holder, "",
+          "pushing " + holder + " from " + wp + " to " + hc + " depth=" + std::to_string(depth) +
+          " (after pushing " + hc_holder + ")",
+          __FILE__, __LINE__, __func__);
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 bool FleetManagerNode::try_build_retreat_chain(
   const std::string & requester, const std::string & from_wp,
   const std::string & to_wp, const std::string & blocker,
@@ -1004,7 +1086,7 @@ bool FleetManagerNode::try_build_retreat_chain(
   std::string best_retreat;
   std::vector<RetreatChainStep> best_subchain;
 
-  // 搜索请求者的撤退方向(优先直接空闲航点, 其次递归子链)
+  // 搜索请求者的撤退方向(优先直接空闲航点, 其次请求占据者让路)
   for (const auto & nb : conns) {
     if (nb == to_wp || blocked_set.count(nb)) continue;
 
@@ -1015,46 +1097,100 @@ bool FleetManagerNode::try_build_retreat_chain(
       break;  // 直接空闲 → 最优
     }
 
-    // 被占用 → 尝试针对持有者递归构建子链
+    // 被占据 → 递归推占据者让路
     if (is_robot_stationary(holder)) {
-      std::set<std::string> holder_blocked = blocked_set;
-      holder_blocked.insert(to_wp);
-
-      ChainRetreatPlan saved;
-      saved.steps.swap(chain_plan_.steps);
-
-      if (try_build_retreat_chain(holder, nb, from_wp, requester, holder_blocked, depth + 1)) {
-        std::vector<RetreatChainStep> candidate = std::move(chain_plan_.steps);
-        chain_plan_.steps.swap(saved.steps);
-        if (best_retreat.empty() || candidate.size() < best_subchain.size()) {
-          best_retreat = nb;
-          best_subchain = std::move(candidate);
-        }
-      } else {
-        chain_plan_.steps.swap(saved.steps);
+      std::set<std::string> push_excluded = blocked_set;
+      push_excluded.insert(from_wp);
+      push_excluded.insert(to_wp);
+      std::set<std::string> push_visited;
+      std::vector<RetreatChainStep> push_steps;
+      if (try_push_occupant(nb, push_excluded, push_visited, 0, push_steps)) {
+        best_subchain = std::move(push_steps);
+        best_retreat = nb;
+        break;
       }
     }
   }
 
-  if (best_retreat.empty()) return false;
+  if (best_retreat.empty()) {
+    PersistLogger::log_warn("nav.chain_no_retreat", requester, "",
+      "all neighbors of " + from_wp + " are occupied, cannot find retreat direction",
+      __FILE__, __LINE__, __func__);
+    return false;
+  }
 
-  // 组装链: [子链...] → [请求者撤退] → [阻塞者退出] → [请求者恢复]
+  // 组装链: [清路(请求者侧)...] → [请求者撤退] → [清路(阻塞者侧)...] → [阻塞者退出] → [请求者恢复]
   for (auto & s : best_subchain) chain_plan_.steps.push_back(std::move(s));
 
   chain_plan_.steps.push_back({requester, best_retreat});
 
   // 为阻塞者找退出目标(非阻塞航点, 非撤退航点, 非请求者路径上的航点)
+  // 如果直接邻居被占据，也尝试推占据者让路
   std::string blocker_dest;
+  std::vector<RetreatChainStep> blocker_clear_steps;
   for (const auto & nb : traffic_->get_waypoint_connections(from_wp)) {
     if (nb == to_wp || nb == best_retreat || blocked_set.count(nb)) continue;
-    if (occupancy_->waypoint_blocker("", nb).empty()) { blocker_dest = nb; break; }
+    auto nb_holder = occupancy_->get_zone_holder(nb);
+    if (nb_holder.empty()) { blocker_dest = nb; break; }
+    // 被占据 → 递归推占据者让路
+    if (is_robot_stationary(nb_holder)) {
+      std::set<std::string> push_excluded = blocked_set;
+      push_excluded.insert(from_wp);
+      push_excluded.insert(best_retreat);
+      push_excluded.insert(to_wp);
+      std::set<std::string> push_visited;
+      if (try_push_occupant(nb, push_excluded, push_visited, 0, blocker_clear_steps)) {
+        blocker_dest = nb;
+        break;
+      }
+    }
   }
-  if (blocker_dest.empty())
-    blocker_dest = occupancy_->find_nearest_free_waypoint(from_wp, {to_wp, requester});
   if (blocker_dest.empty()) {
+    // 图拓扑感知搜索: 找最近空闲航点，且从 from_wp 到该航点的路径不能穿过 best_retreat
+    // (因为请求者撤退后占据 best_retreat，阻塞者路径若穿过它会导致 zone_collision)
+    std::string best_candidate;
+    double best_cand_dist = std::numeric_limits<double>::max();
+    auto from_pose = traffic_->get_waypoint_pose(from_wp);
+    auto all_wps = traffic_->get_all_waypoint_poses();
+
+    int skipped_occupied = 0, skipped_to_wp = 0, skipped_best_retreat = 0, skipped_path = 0, total = 0;
+    for (const auto & [wp_id, wp_pose] : all_wps) {
+      total++;
+      if (wp_id == to_wp) { skipped_to_wp++; continue; }
+      if (wp_id == best_retreat) { skipped_best_retreat++; continue; }
+      if (!occupancy_->is_zone_free_for("", wp_id)) { skipped_occupied++; continue; }
+
+      // 验证从 from_wp 到 wp_id 的路径不穿过 best_retreat
+      auto check_path = traffic_->find_path(from_wp, wp_id);
+      bool passes_through = false;
+      for (const auto & w : check_path) {
+        if (w == best_retreat) { passes_through = true; break; }
+      }
+      if (passes_through) { skipped_path++; continue; }
+
+      double d = std::hypot(wp_pose.position.x - from_pose.position.x,
+                             wp_pose.position.y - from_pose.position.y);
+      if (d < best_cand_dist) { best_cand_dist = d; best_candidate = wp_id; }
+    }
+    PersistLogger::log_warn("nav.chain_fallback_stats", requester, "",
+      "from=" + from_wp + " best_retreat=" + best_retreat +
+      " total=" + std::to_string(total) +
+      " skipped_occupied=" + std::to_string(skipped_occupied) +
+      " skipped_path=" + std::to_string(skipped_path) +
+      " best=" + (best_candidate.empty() ? "(none)" : best_candidate),
+      __FILE__, __LINE__, __func__);
+    blocker_dest = best_candidate;
+  }
+  if (blocker_dest.empty()) {
+    PersistLogger::log_warn("nav.chain_no_blocker_exit", requester, "",
+      "cannot find blocker exit from " + from_wp + " (best_retreat=" + best_retreat + " to_wp=" + to_wp + ")",
+      __FILE__, __LINE__, __func__);
     chain_plan_.steps.clear();
     return false;
   }
+  // 先插入阻塞者清路步骤，再插入阻塞者退出步骤
+  for (auto & s : blocker_clear_steps) chain_plan_.steps.push_back(std::move(s));
+
   chain_plan_.steps.push_back({blocker, blocker_dest});
 
   // 请求者恢复到原目标
@@ -1088,18 +1224,40 @@ void FleetManagerNode::execute_chain_step()
     abort_chain("target waypoint not found: " + step.target_wp); return;
   }
 
-  ni->route = {step.target_wp};
-  ni->route_index = 0;
   ni->current_task_id = std::string(kChainTaskPrefix) + step.robot_id;
   ni->retry_count = 0;
   ni->retry_after = rclcpp::Time{};
 
+  // 构建从当前位置到目标航点的完整路径，逐航点导航（不再跳点）
+  std::string cur_wp;
+  auto st2 = robots_.find(step.robot_id);
+  if (st2 != robots_.end()) {
+    cur_wp = st2->second.current_waypoint;
+    if (cur_wp.empty())
+      cur_wp = traffic_->find_nearest_waypoint(st2->second.current_pose);
+  }
+
+  std::vector<std::string> full_path;
+  if (!cur_wp.empty() && cur_wp != step.target_wp) {
+    full_path = traffic_->find_path(cur_wp, step.target_wp);
+  }
+  if (full_path.empty()) full_path.push_back(step.target_wp);
+
+  // 去重
+  std::vector<std::string> clean;
+  for (const auto & w : full_path) {
+    if (clean.empty() || clean.back() != w) clean.push_back(w);
+  }
+  ni->route = clean;
+  ni->route_index = 0;
+
   PersistLogger::log_info("nav.chain_step", step.robot_id, ni->current_task_id,
     "step " + std::to_string(chain_plan_.current_step + 1) + "/" +
-    std::to_string(chain_plan_.steps.size()) + " target=" + step.target_wp,
+    std::to_string(chain_plan_.steps.size()) + " target=" + step.target_wp +
+    " path=" + join_waypoints(clean),
     __FILE__, __LINE__, __func__);
 
-  navigate_to_waypoint(step.robot_id, step.target_wp, ni->current_task_id, true);
+  navigate_to_next_waypoint(step.robot_id);
 }
 
 void FleetManagerNode::on_chain_step_complete(const std::string & robot_id, bool nav_success)
