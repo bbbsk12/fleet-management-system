@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <sstream>
 
 namespace fleet_manager
 {
@@ -41,6 +42,7 @@ void OccupancyManager::set_topology(
   RCLCPP_INFO(node_->get_logger(),
     "[OccupancyManager] topology: %zu waypoints, %zu edges",
     all_waypoints_.size(), all_edges_.size());
+  rebuild_resource_state();
 }
 
 // ============================================================================
@@ -103,38 +105,6 @@ DiscreteLocation OccupancyManager::update_location(
     }
   }
 
-  // 释放该底盘的旧 zone_locks
-  for (auto it = zone_locks_.begin(); it != zone_locks_.end(); ) {
-    if (it->second == robot_id) it = zone_locks_.erase(it);
-    else ++it;
-  }
-
-  // 设置新 zone_locks — 航点优先：静止机器人优先于段上机器人
-  auto safe_set = [&](const std::string & wp, bool is_waypoint) {
-    auto existing = zone_locks_.find(wp);
-    if (existing == zone_locks_.end() || existing->second == robot_id) {
-      zone_locks_[wp] = robot_id;
-    } else if (is_waypoint) {
-      // 静止在航点上的机器人优先级最高，强制接管
-      PersistLogger::log_warn("occ.zone_takeover", robot_id, "",
-        "waypoint robot taking wp=" + wp + " from " + existing->second,
-        __FILE__, __LINE__, __func__);
-      zone_locks_[wp] = robot_id;
-    } else {
-      PersistLogger::log_error(
-        "occ.zone_collision", robot_id, "",
-        "cannot claim wp=" + wp + " already held by " + existing->second,
-        __FILE__, __LINE__, __func__);
-    }
-  };
-
-  if (loc.type == LocationType::WAYPOINT) {
-    safe_set(loc.waypoint_id, true);
-  } else if (loc.type == LocationType::SEGMENT) {
-    safe_set(loc.segment_from, false);
-    safe_set(loc.segment_to, false);
-  }
-
   robot_locations_[robot_id] = loc;
 
   // 到达预留航点时从集合中移除该航点
@@ -152,6 +122,8 @@ DiscreteLocation OccupancyManager::update_location(
     }
   }
 
+  rebuild_resource_state();
+
   return loc;
 }
 
@@ -160,12 +132,7 @@ void OccupancyManager::force_set_location(
 {
   clear_robot(robot_id);
   robot_locations_[robot_id] = loc;
-  if (loc.type == LocationType::WAYPOINT)
-    zone_locks_[loc.waypoint_id] = robot_id;
-  else if (loc.type == LocationType::SEGMENT) {
-    zone_locks_[loc.segment_from] = robot_id;
-    zone_locks_[loc.segment_to]   = robot_id;
-  }
+  rebuild_resource_state();
 }
 
 void OccupancyManager::clear_robot(const std::string & robot_id)
@@ -174,10 +141,8 @@ void OccupancyManager::clear_robot(const std::string & robot_id)
   reservations_.erase(robot_id);
   reservation_times_.erase(robot_id);
   ghost_locks_.erase(robot_id);
-  for (auto it = zone_locks_.begin(); it != zone_locks_.end(); ) {
-    if (it->second == robot_id) it = zone_locks_.erase(it);
-    else ++it;
-  }
+  robot_states_.erase(robot_id);
+  rebuild_resource_state();
 }
 
 // ============================================================================
@@ -190,15 +155,27 @@ std::string OccupancyManager::can_enter(
   const std::string & to_wp) const
 {
   if (to_wp.empty() || from_wp.empty() || to_wp == from_wp) return "invalid";
+  if (!conflict_hubs_.empty()) {
+    for (const auto & [hub, holders] : conflict_hubs_) {
+      if (hub == from_wp || hub == to_wp) return first_other_holder(holders, robot_id);
+    }
+  }
+  const std::string move_edge = edge_key(from_wp, to_wp);
+  auto ce = conflict_edges_.find(move_edge);
+  if (ce != conflict_edges_.end()) return first_other_holder(ce->second, robot_id);
 
-  // zone_lock 检查 (物理占用)
-  auto zl = zone_locks_.find(to_wp);
-  if (zl != zone_locks_.end() && zl->second != robot_id) return zl->second;
-
-  // 预留检查 (其他底盘的预约，遍历集合)
-  for (const auto & [rid, wps] : reservations_) {
+  const std::set<std::string> footprint{from_wp, to_wp};
+  for (const auto & wp : footprint) {
+    auto zl = zone_locks_.find(wp);
+    if (zl != zone_locks_.end() && zl->second != robot_id) return zl->second;
+    for (const auto & [rid, wps] : reservations_) {
+      if (rid == robot_id) continue;
+      if (wps.count(wp)) return rid;
+    }
+  }
+  for (const auto & [rid, edges] : edge_reservations_) {
     if (rid == robot_id) continue;
-    if (wps.count(to_wp)) return rid;
+    if (edges.count(move_edge)) return rid;
   }
 
   return "";  // 畅通
@@ -209,6 +186,8 @@ std::string OccupancyManager::waypoint_blocker(
   const std::string & wp_id) const
 {
   if (wp_id.empty()) return "";
+  auto ch = conflict_hubs_.find(wp_id);
+  if (ch != conflict_hubs_.end()) return first_other_holder(ch->second, robot_id);
   auto zl = zone_locks_.find(wp_id);
   if (zl != zone_locks_.end() && zl->second != robot_id) return zl->second;
   for (const auto & [rid, wps] : reservations_) {
@@ -236,8 +215,11 @@ bool OccupancyManager::reserve_next(
     return false;
   }
 
+  reservations_[robot_id].insert(from_wp);
   reservations_[robot_id].insert(to_wp);
   reservation_times_[robot_id] = node_->now();
+  set_robot_state(robot_id, RobotResourceState::RESERVED);
+  rebuild_resource_state();
   return true;
 }
 
@@ -245,14 +227,13 @@ void OccupancyManager::release_reservations(const std::string & robot_id)
 {
   reservations_.erase(robot_id);
   reservation_times_.erase(robot_id);
+  rebuild_resource_state();
 }
 
 void OccupancyManager::release_locks(const std::string & robot_id)
 {
-  for (auto it = zone_locks_.begin(); it != zone_locks_.end(); ) {
-    if (it->second == robot_id) it = zone_locks_.erase(it);
-    else ++it;
-  }
+  robot_locations_.erase(robot_id);
+  rebuild_resource_state();
 }
 
 void OccupancyManager::expire_stale_reservations()
@@ -270,6 +251,7 @@ void OccupancyManager::expire_stale_reservations()
     reservations_.erase(rid);
     reservation_times_.erase(rid);
   }
+  if (!expired.empty()) rebuild_resource_state();
 }
 
 // ============================================================================
@@ -284,6 +266,8 @@ DiscreteLocation OccupancyManager::get_location(const std::string & robot_id) co
 
 std::string OccupancyManager::get_zone_holder(const std::string & wp_id) const
 {
+  auto ch = conflict_hubs_.find(wp_id);
+  if (ch != conflict_hubs_.end()) return first_other_holder(ch->second, "");
   auto it = zone_locks_.find(wp_id);
   return (it != zone_locks_.end()) ? it->second : "";
 }
@@ -291,6 +275,7 @@ std::string OccupancyManager::get_zone_holder(const std::string & wp_id) const
 bool OccupancyManager::is_zone_free_for(
   const std::string & robot_id, const std::string & wp_id) const
 {
+  if (conflict_hubs_.count(wp_id)) return false;
   auto zl = zone_locks_.find(wp_id);
   if (zl != zone_locks_.end() && zl->second != robot_id) return false;
   for (const auto & [rid, wps] : reservations_) {
@@ -343,6 +328,7 @@ std::set<std::string> OccupancyManager::get_occupied_zones() const
 {
   std::set<std::string> s;
   for (const auto & [wp, _] : zone_locks_) s.insert(wp);
+  for (const auto & [wp, _] : conflict_hubs_) s.insert(wp);
   for (const auto & [_, wps] : reservations_)
     for (const auto & wp : wps) s.insert(wp);
   return s;
@@ -353,6 +339,140 @@ std::map<std::string, DiscreteLocation> OccupancyManager::get_all_locations() co
   return robot_locations_;
 }
 
+std::map<std::string, std::set<std::string>> OccupancyManager::get_conflict_hubs() const
+{
+  return conflict_hubs_;
+}
+
+std::map<std::string, std::set<std::string>> OccupancyManager::get_conflict_edges() const
+{
+  return conflict_edges_;
+}
+
+RobotResourceState OccupancyManager::get_robot_resource_state(const std::string & robot_id) const
+{
+  auto it = robot_states_.find(robot_id);
+  return (it != robot_states_.end()) ? it->second : RobotResourceState::UNKNOWN;
+}
+
+std::set<std::string> OccupancyManager::hubs_for_location(const DiscreteLocation & loc) const
+{
+  std::set<std::string> hubs;
+  if (loc.type == LocationType::WAYPOINT && !loc.waypoint_id.empty()) {
+    hubs.insert(loc.waypoint_id);
+  } else if (loc.type == LocationType::SEGMENT) {
+    if (!loc.segment_from.empty()) hubs.insert(loc.segment_from);
+    if (!loc.segment_to.empty()) hubs.insert(loc.segment_to);
+  }
+  return hubs;
+}
+
+void OccupancyManager::rebuild_resource_state()
+{
+  zone_locks_.clear();
+  physical_hubs_.clear();
+  physical_edges_.clear();
+  ghost_hubs_.clear();
+  conflict_hubs_.clear();
+  conflict_edges_.clear();
+  edge_reservations_.clear();
+  robot_states_.clear();
+
+  for (const auto & [rid, loc] : robot_locations_) {
+    auto hubs = hubs_for_location(loc);
+    if (hubs.empty()) {
+      set_robot_state(rid, RobotResourceState::IDLE);
+      continue;
+    }
+    for (const auto & hub : hubs) physical_hubs_[hub].insert(rid);
+    if (loc.type == LocationType::WAYPOINT) set_robot_state(rid, RobotResourceState::IDLE);
+    else if (loc.type == LocationType::SEGMENT) {
+      physical_edges_[edge_key(loc.segment_from, loc.segment_to)].insert(rid);
+      set_robot_state(rid, RobotResourceState::MOVING);
+    }
+  }
+
+  for (const auto & [rid, _] : ghost_locks_) {
+    auto loc_it = robot_locations_.find(rid);
+    if (loc_it == robot_locations_.end()) continue;
+    auto hubs = hubs_for_location(loc_it->second);
+    for (const auto & hub : hubs) ghost_hubs_[hub].insert(rid);
+    set_robot_state(rid, RobotResourceState::GHOST);
+  }
+
+  for (const auto & [rid, wps] : reservations_) {
+    if (!wps.empty() && !ghost_locks_.count(rid)) {
+      if (wps.size() == 2) {
+        auto it = wps.begin();
+        const std::string a = *it++;
+        const std::string b = *it;
+        edge_reservations_[edge_key(a, b)].insert(rid);
+      }
+      auto st = get_robot_resource_state(rid);
+      if (st == RobotResourceState::UNKNOWN || st == RobotResourceState::IDLE)
+        set_robot_state(rid, RobotResourceState::RESERVED);
+    }
+  }
+
+  std::set<std::string> next_conflicts;
+  for (const auto & [hub, holders] : physical_hubs_) {
+    if (holders.size() <= 1) {
+      if (!holders.empty()) zone_locks_[hub] = *holders.begin();
+      continue;
+    }
+    conflict_hubs_[hub] = holders;
+    next_conflicts.insert(conflict_key(hub, holders));
+    for (const auto & rid : holders) set_robot_state(rid, RobotResourceState::CONFLICT);
+  }
+
+  for (const auto & [edge, holders] : physical_edges_) {
+    if (holders.size() <= 1) continue;
+    conflict_edges_[edge] = holders;
+    next_conflicts.insert(conflict_key(edge, holders));
+    for (const auto & rid : holders) set_robot_state(rid, RobotResourceState::CONFLICT);
+  }
+
+  for (const auto & [hub, holders] : conflict_hubs_) {
+    const auto key = conflict_key(hub, holders);
+    if (!active_conflict_keys_.count(key)) {
+      std::ostringstream oss;
+      bool first = true;
+      for (const auto & rid : holders) {
+        if (!first) oss << ",";
+        first = false;
+        oss << rid;
+      }
+      PersistLogger::log_error("occ.hub_conflict", "",
+        "",
+        "hub=" + hub + " holders=" + oss.str(),
+        __FILE__, __LINE__, __func__);
+    }
+  }
+  for (const auto & [edge, holders] : conflict_edges_) {
+    const auto key = conflict_key(edge, holders);
+    if (!active_conflict_keys_.count(key)) {
+      std::ostringstream oss;
+      bool first = true;
+      for (const auto & rid : holders) {
+        if (!first) oss << ",";
+        first = false;
+        oss << rid;
+      }
+      PersistLogger::log_error("occ.edge_conflict", "",
+        "",
+        "edge=" + edge + " holders=" + oss.str(),
+        __FILE__, __LINE__, __func__);
+    }
+  }
+  active_conflict_keys_ = std::move(next_conflicts);
+}
+
+void OccupancyManager::set_robot_state(const std::string & robot_id, RobotResourceState state)
+{
+  if (robot_id.empty()) return;
+  robot_states_[robot_id] = state;
+}
+
 // ============================================================================
 // 几何辅助
 // ============================================================================
@@ -360,6 +480,49 @@ std::map<std::string, DiscreteLocation> OccupancyManager::get_all_locations() co
 std::string OccupancyManager::edge_key(const std::string & a, const std::string & b)
 {
   return (a <= b) ? (a + "<->" + b) : (b + "<->" + a);
+}
+
+std::string OccupancyManager::conflict_key(const std::string & hub, const std::set<std::string> & holders)
+{
+  std::string key = hub + ":";
+  for (const auto & rid : holders) key += rid + "|";
+  return key;
+}
+
+std::string OccupancyManager::first_other_holder(
+  const std::set<std::string> & holders, const std::string & robot_id)
+{
+  for (const auto & rid : holders) {
+    if (rid != robot_id) return rid;
+  }
+  return holders.empty() ? "" : *holders.begin();
+}
+
+std::string OccupancyManager::resource_state_name(ResourceOwnerState state)
+{
+  switch (state) {
+    case ResourceOwnerState::FREE: return "FREE";
+    case ResourceOwnerState::RESERVED: return "RESERVED";
+    case ResourceOwnerState::OCCUPIED: return "OCCUPIED";
+    case ResourceOwnerState::GHOST: return "GHOST";
+    case ResourceOwnerState::CONFLICT: return "CONFLICT";
+  }
+  return "UNKNOWN";
+}
+
+std::string OccupancyManager::robot_state_name(RobotResourceState state)
+{
+  switch (state) {
+    case RobotResourceState::UNKNOWN: return "UNKNOWN";
+    case RobotResourceState::IDLE: return "IDLE";
+    case RobotResourceState::RESERVED: return "RESERVED";
+    case RobotResourceState::MOVING: return "MOVING";
+    case RobotResourceState::WAITING: return "WAITING";
+    case RobotResourceState::EXECUTING: return "EXECUTING";
+    case RobotResourceState::GHOST: return "GHOST";
+    case RobotResourceState::CONFLICT: return "CONFLICT";
+  }
+  return "UNKNOWN";
 }
 
 double OccupancyManager::point_to_segment_distance(
@@ -380,6 +543,7 @@ double OccupancyManager::point_to_segment_distance(
 void OccupancyManager::mark_ghost(const std::string & robot_id, rclcpp::Time now)
 {
   ghost_locks_[robot_id] = now;
+  rebuild_resource_state();
   PersistLogger::log_info(
     "occ.ghost", robot_id, "",
     "zone locks marked as ghost (will expire after TTL)",
@@ -389,6 +553,7 @@ void OccupancyManager::mark_ghost(const std::string & robot_id, rclcpp::Time now
 void OccupancyManager::clear_ghost(const std::string & robot_id)
 {
   ghost_locks_.erase(robot_id);
+  rebuild_resource_state();
 }
 
 bool OccupancyManager::is_holder_active(const std::string & robot_id, rclcpp::Time now, double ttl_sec) const
@@ -413,6 +578,7 @@ void OccupancyManager::expire_ghost_locks(rclcpp::Time now, double ttl_sec)
     release_locks(rid);
     release_reservations(rid);
     ghost_locks_.erase(rid);
+    rebuild_resource_state();
   }
 }
 

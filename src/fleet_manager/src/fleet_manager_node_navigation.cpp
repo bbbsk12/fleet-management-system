@@ -17,7 +17,7 @@ namespace
 {
 constexpr int    kMaxChainDepth        = 5;
 constexpr double kChainTotalTimeout    = 180.0;
-constexpr double kChainStepTimeout     = 30.0;
+constexpr double kChainStepTimeout     = 8.0;
 constexpr int    kMaxChainStepRetries  = 2;
 constexpr const char * kChainTaskPrefix = "chain_retreat_";
 }  // namespace
@@ -57,6 +57,23 @@ bool FleetManagerNode::start_navigation(
   if (std::hypot(dx, dy) <= waypoint_radius_) {
     on_nav_succeeded(robot_id, task_id);
     return true;
+  }
+
+  if (!is_internal_task_id(task_id)) {
+    std::string target_blocker = occupancy_->waypoint_blocker(robot_id, target_wp);
+    if (!target_blocker.empty()) {
+      scheduler_->mark_task_waiting(task_id);
+      task_waits_[task_id] = {TaskWaitState::WAIT_TARGET_CLEAR, robot_id, task_id,
+        target_blocker, std::string{}, std::string{}, target_wp, ni->retry_count};
+      waiting_for_[target_blocker].insert(robot_id);
+      ni->retry_after = rclcpp::Time{};
+      fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(task_id);
+      if (!ti.task_id.empty()) task_pub_->publish(ti);
+      PersistLogger::log_info("nav.target_blocked_wait", robot_id, task_id,
+        "target " + target_wp + " blocked by " + target_blocker,
+        __FILE__, __LINE__, __func__);
+      return false;
+    }
   }
 
   // 找到最近的航点作为路径起点
@@ -115,9 +132,7 @@ bool FleetManagerNode::start_navigation(
   path = clean;
   if (path.empty()) path.push_back(target_wp);
 
-  // 检查首跳是否被阻塞。离线阻塞者立即失败；在线阻塞者不在此放弃，
-  // 而是跳过预留步骤，交给 navigate_to_next_waypoint 做协调（链式撤退/简单避让）。
-  bool first_hop_blocked_by_online = false;
+  // 检查首跳是否被阻塞。离线阻塞者立即失败；在线阻塞者交给 navigate_to_next_waypoint 做协调。
   if (path.size() >= 2) {
     std::string blocker = occupancy_->can_enter(robot_id, path[0], path[1]);
     if (!blocker.empty()) {
@@ -128,8 +143,6 @@ bool FleetManagerNode::start_navigation(
         task_pub_->publish(ti);
         return false;
       }
-      // 在线阻塞者：标记后跳过预留，交给 navigate_to_next_waypoint 处理协调
-      first_hop_blocked_by_online = true;
       PersistLogger::log_info("nav.first_hop_blocked_online", robot_id, task_id,
         "first hop " + path[0] + "->" + path[1] + " blocked by online " + blocker +
         ", delegating coordination to navigate_to_next_waypoint",
@@ -137,25 +150,7 @@ bool FleetManagerNode::start_navigation(
     }
   }
 
-  // 全路径预留（首跳被在线阻塞时跳过，留给 navigate_to_next_waypoint 做协调）
-  if (!first_hop_blocked_by_online && path.size() >= 2) {
-    bool all_reserved = true;
-    for (size_t i = 1; i < path.size(); ++i) {
-      if (!occupancy_->reserve_next(robot_id, path[i-1], path[i])) {
-        PersistLogger::log_warn("nav.path_blocked", robot_id, task_id,
-          "cannot reserve hop " + std::to_string(i) + ": " + path[i-1] + "->" + path[i],
-          __FILE__, __LINE__, __func__);
-        all_reserved = false;
-        break;
-      }
-    }
-    if (!all_reserved) {
-      occupancy_->release_reservations(robot_id);
-      ni->retry_after = now + rclcpp::Duration::from_seconds(retry_base_);
-      scheduler_->mark_task_waiting(task_id);
-      return false;
-    }
-  } else if (!first_hop_blocked_by_online && path.size() <= 1) {
+  if (path.size() <= 1) {
     std::string wp = path[0];
     std::string blocker = occupancy_->waypoint_blocker(robot_id, wp);
     if (!blocker.empty()) {
@@ -173,6 +168,7 @@ bool FleetManagerNode::start_navigation(
   ni->current_task_id = task_id;
   ni->retry_count = 0;
   ni->retry_after = rclcpp::Time{};
+  task_waits_.erase(task_id);
 
   RCLCPP_INFO(this->get_logger(),
     "nav.start task=%s robot=%s path=%zu waypoints: %s",
@@ -233,11 +229,66 @@ void FleetManagerNode::navigate_to_next_waypoint(const std::string & robot_id)
         "from=" + from + " to=" + wp + " blocker=" + blocker,
         __FILE__, __LINE__, __func__);
 
+      std::string target_blocker;
+      if (is_final && !is_internal_task_id(ni->current_task_id)) {
+        target_blocker = occupancy_->waypoint_blocker(robot_id, wp);
+      }
+      if (!target_blocker.empty()) {
+        std::string tid = ni->current_task_id;
+        scheduler_->mark_task_waiting(tid);
+        task_waits_[tid] = {TaskWaitState::WAIT_TARGET_CLEAR, robot_id, tid,
+          target_blocker, std::string{}, std::string{}, wp, ni->retry_count};
+        waiting_for_[target_blocker].insert(robot_id);
+        occupancy_->release_reservations(robot_id);
+        ni->has_active_goal = false;
+        ni->current_task_id.clear();
+        ni->route.clear();
+        ni->route_index = 0;
+        ni->retry_count = 0;
+        ni->retry_after = rclcpp::Time{};
+        fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(tid);
+        if (!ti.task_id.empty()) task_pub_->publish(ti);
+        PersistLogger::log_info("nav.final_target_blocked_wait", robot_id, tid,
+          "target " + wp + " blocked by " + target_blocker,
+          __FILE__, __LINE__, __func__);
+        return;
+      }
+
+      if (chain_plan_.active && ni->current_task_id.rfind(kChainTaskPrefix, 0) != 0) {
+        auto inserted = waiting_for_[blocker].insert(robot_id).second;
+        ni->retry_after = this->now() + rclcpp::Duration::from_seconds(5.0);
+        if (inserted) {
+          PersistLogger::log_info("nav.wait_chain_active", robot_id, ni->current_task_id,
+            "chain active, waiting for blocker " + blocker,
+            __FILE__, __LINE__, __func__);
+        }
+        return;
+      }
+
       // ── 检查阻塞者是否忙 ──
       auto blocker_ni = get_or_create_nav(blocker);
       bool blocker_busy = blocker_ni && (blocker_ni->has_active_goal || !blocker_ni->route.empty() || blocker_ni->chassis_task_sent);
 
       if (blocker_busy) {
+        if (chain_plan_.active) {
+          if (ni->current_task_id.rfind(kChainTaskPrefix, 0) == 0) {
+            ni->retry_count++;
+            ni->retry_after = this->now() + rclcpp::Duration::from_seconds(2.0);
+            if (ni->retry_count > retry_max_) {
+              abort_chain("chain step blocked by busy robot " + blocker);
+            }
+            return;
+          }
+          auto inserted = waiting_for_[blocker].insert(robot_id).second;
+          ni->retry_after = this->now() + rclcpp::Duration::from_seconds(5.0);
+          if (inserted) {
+            PersistLogger::log_info("nav.wait_chain_active", robot_id, ni->current_task_id,
+              "chain active, waiting for blocker " + blocker,
+              __FILE__, __LINE__, __func__);
+          }
+          return;
+        }
+
         // 互锁时即使阻塞者忙也尝试链撤退（暂停双方任务协调交换）
         if (is_mutual_block(blocker, wp, robot_id, from)) {
           chain_plan_.saved_task_ids.clear();
@@ -291,10 +342,13 @@ void FleetManagerNode::navigate_to_next_waypoint(const std::string & robot_id)
           }
         }
         // 非互锁 → 事件驱动等待：注册到阻塞者的等待列表
-        waiting_for_[blocker].insert(robot_id);
-        PersistLogger::log_info("nav.wait_for_blocker", robot_id, ni->current_task_id,
-          "registered to wait for blocker " + blocker,
-          __FILE__, __LINE__, __func__);
+        auto inserted = waiting_for_[blocker].insert(robot_id).second;
+        ni->retry_after = this->now() + rclcpp::Duration::from_seconds(30.0);
+        if (inserted) {
+          PersistLogger::log_info("nav.wait_for_blocker", robot_id, ni->current_task_id,
+            "registered to wait for blocker " + blocker,
+            __FILE__, __LINE__, __func__);
+        }
         return;
       }
 
@@ -303,6 +357,26 @@ void FleetManagerNode::navigate_to_next_waypoint(const std::string & robot_id)
       double jitter = 0.7 + 0.6 * (static_cast<double>(std::hash<std::string>{}(robot_id) % 1000) / 1000.0);
       double backoff = jitter * retry_base_ * std::pow(1.5, std::min(ni->retry_count, retry_max_));
       ni->retry_after = this->now() + rclcpp::Duration::from_seconds(backoff);
+      auto waiting_inserted = waiting_for_[blocker].insert(robot_id).second;
+      if (waiting_inserted) {
+        PersistLogger::log_info("nav.wait_for_blocker", robot_id, ni->current_task_id,
+          "registered to wait for blocker " + blocker,
+          __FILE__, __LINE__, __func__);
+      }
+
+      if (is_internal_task_id(ni->current_task_id)) {
+        if (chain_plan_.active && ni->retry_count > retry_max_) {
+          abort_chain("internal coordination step blocked from " + from + " to " + wp +
+            " by " + blocker);
+        } else if (!chain_plan_.active && ni->retry_count > retry_max_) {
+          occupancy_->release_reservations(robot_id);
+          ni->current_task_id.clear();
+          ni->route.clear();
+          ni->route_index = 0;
+          ni->retry_count = 0;
+        }
+        return;
+      }
 
       if (ni->retry_count >= 2 && !is_internal_task_id(ni->current_task_id)) {
         auto blocker_st = robots_.find(blocker);
@@ -389,6 +463,15 @@ void FleetManagerNode::navigate_to_next_waypoint(const std::string & robot_id)
           if (blocker_truly_idle) {
             // 统一图感知安全搜索
             std::set<std::string> exclude_set(ni->route.begin(), ni->route.end());
+            for (const auto & existing : scheduler_->get_all_tasks()) {
+              if (existing.task_id.empty() || existing.task_id == ni->current_task_id) continue;
+              if (existing.waypoint_id.empty()) continue;
+              if (existing.status == "completed" || existing.status == "failed" ||
+                  existing.status == "cancelled" || existing.status == "pending") {
+                continue;
+              }
+              exclude_set.insert(existing.waypoint_id);
+            }
             std::string avoid_wp = find_safe_free_waypoint(wp, exclude_set, blocker);
             if (!avoid_wp.empty() && avoid_wp != wp) {
               // 先预留目标航点，防止其他机器人抢占
@@ -412,7 +495,47 @@ void FleetManagerNode::navigate_to_next_waypoint(const std::string & robot_id)
         } // end else (blocker_online)
       } // end if retry_count >= 2
 
-      // 退避耗尽 → 保留绑定回队
+      if (ni->retry_count >= 3 && !is_internal_task_id(ni->current_task_id)) {
+        std::set<std::string> retreat_exclude(ni->route.begin(), ni->route.end());
+        retreat_exclude.insert(wp);
+        for (const auto & existing : scheduler_->get_all_tasks()) {
+          if (existing.task_id.empty() || existing.task_id == ni->current_task_id) continue;
+          if (existing.waypoint_id.empty()) continue;
+          if (existing.status == "completed" || existing.status == "failed" ||
+              existing.status == "cancelled" || existing.status == "pending") {
+            continue;
+          }
+          retreat_exclude.insert(existing.waypoint_id);
+        }
+        std::string retreat_wp = find_safe_free_waypoint(from, retreat_exclude, robot_id);
+        if (!retreat_wp.empty() && retreat_wp != from) {
+          occupancy_->release_reservations(robot_id);
+          if (occupancy_->reserve_next(robot_id, from, retreat_wp)) {
+            std::string tid = ni->current_task_id;
+            scheduler_->mark_task_waiting(tid);
+            task_waits_[tid] = {TaskWaitState::SELF_RELOCATING, robot_id, tid,
+              blocker, from, wp, ni->route.empty() ? std::string{} : ni->route.back(),
+              ni->retry_count};
+            waiting_for_[blocker].insert(robot_id);
+            fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(tid);
+            if (!ti.task_id.empty()) task_pub_->publish(ti);
+            PersistLogger::log_info("nav.self_retreat", robot_id, tid,
+              "retreating from " + from + " to " + retreat_wp +
+              " after repeated block by " + blocker,
+              __FILE__, __LINE__, __func__);
+            ni->has_active_goal = false;
+            ni->route = {retreat_wp};
+            ni->route_index = 0;
+            ni->current_task_id = "avoidance_" + robot_id;
+            ni->retry_count = 0;
+            ni->retry_after = rclcpp::Time{};
+            navigate_to_waypoint(robot_id, retreat_wp, ni->current_task_id, true);
+            return;
+          }
+        }
+      }
+
+      // 退避耗尽 → 释放非固定绑定回队
       if (ni->retry_count > retry_max_ * 2) {
         std::string tid = ni->current_task_id;
         occupancy_->release_reservations(robot_id);
@@ -426,7 +549,7 @@ void FleetManagerNode::navigate_to_next_waypoint(const std::string & robot_id)
           task_pub_->publish(ti);
           finalize_task_completion(robot_id, tid);
         } else {
-          scheduler_->mark_task_pending_preserve(tid);
+          scheduler_->mark_task_pending(tid);
           fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(tid);
           task_pub_->publish(ti);
         }
@@ -564,7 +687,7 @@ void FleetManagerNode::navigate_to_waypoint(
             if (!ti.task_id.empty()) task_pub_->publish(ti);
             finalize_task_completion(robot_id, tid);
           } else {
-            scheduler_->mark_task_pending_preserve(tid);
+            scheduler_->mark_task_pending(tid);
             fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(tid);
             if (!ti.task_id.empty()) task_pub_->publish(ti);
           }
@@ -596,6 +719,7 @@ void FleetManagerNode::on_nav_succeeded(
 {
   std::lock_guard<std::recursive_mutex> lock(mtx_);
   auto ni = get_or_create_nav(robot_id);
+  task_waits_.erase(task_id);
 
   // 内部任务(避让/链撤退/自动驶离): 仅清理 nav 状态, 不触发完整任务流程
   if (task_id.rfind("avoidance_", 0) == 0 ||
@@ -643,6 +767,15 @@ void FleetManagerNode::check_arrivals()
     if ((now - chain_plan_.started_at).seconds() >= kChainTotalTimeout) {
       abort_chain("chain total timeout (" + std::to_string(kChainTotalTimeout) + "s)");
       return;
+    }
+    if (chain_plan_.current_step < chain_plan_.steps.size() &&
+        (now - chain_plan_.started_at).seconds() >= kChainStepTimeout) {
+      const auto & step = chain_plan_.steps[chain_plan_.current_step];
+      auto ni = get_or_create_nav(step.robot_id);
+      if (!ni || !ni->has_active_goal) {
+        abort_chain("chain step made no progress for " + std::to_string(kChainStepTimeout) + "s");
+        return;
+      }
     }
   }
 
@@ -701,7 +834,7 @@ void FleetManagerNode::check_arrivals()
           task_pub_->publish(ti);
           finalize_task_completion(rid, tid);
         } else {
-          scheduler_->mark_task_pending_preserve(tid);
+          scheduler_->mark_task_pending(tid);
           fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(tid);
           task_pub_->publish(ti);
         }
@@ -724,7 +857,7 @@ void FleetManagerNode::check_arrivals()
         task_pub_->publish(ti);
         finalize_task_completion(rid, tid);
       } else {
-        scheduler_->mark_task_pending_preserve(tid);
+        scheduler_->mark_task_pending(tid);
         fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(tid);
         task_pub_->publish(ti);
       }
@@ -900,6 +1033,7 @@ void FleetManagerNode::finalize_task_completion(
 {
   auto ni = get_or_create_nav(robot_id);
   if (!ni) return;
+  task_waits_.erase(task_id);
   occupancy_->release_reservations(robot_id);
   ni->current_task_id.clear();
   ni->has_active_goal = false;
@@ -1153,6 +1287,8 @@ bool FleetManagerNode::try_build_retreat_chain(
   // 搜索请求者的撤退方向(优先直接空闲航点, 其次请求占据者让路)
   for (const auto & nb : conns) {
     if (nb == to_wp || blocked_set.count(nb)) continue;
+    auto direct_blocker = occupancy_->can_enter(requester, from_wp, nb);
+    if (!direct_blocker.empty() && direct_blocker != requester) continue;
 
     auto holder = occupancy_->get_zone_holder(nb);
     if (holder.empty() || holder == requester) {
@@ -1176,31 +1312,32 @@ bool FleetManagerNode::try_build_retreat_chain(
     }
   }
 
-  if (best_retreat.empty()) {
-    PersistLogger::log_warn("nav.chain_no_retreat", requester, "",
-      "all neighbors of " + from_wp + " are occupied, cannot find retreat direction",
-      __FILE__, __LINE__, __func__);
-    return false;
-  }
-
   // 组装链: [清路(请求者侧)...] → [请求者撤退] → [清路(阻塞者侧)...] → [阻塞者退出] → [请求者恢复]
   for (auto & s : best_subchain) chain_plan_.steps.push_back(std::move(s));
 
-  chain_plan_.steps.push_back({requester, best_retreat});
+  if (!best_retreat.empty()) {
+    chain_plan_.steps.push_back({requester, best_retreat});
+  } else {
+    PersistLogger::log_info("nav.chain_requester_hold", requester, "",
+      "requester has no safe retreat from " + from_wp + ", moving blocker first",
+      __FILE__, __LINE__, __func__);
+  }
 
   // 为阻塞者找退出目标(非阻塞航点, 非撤退航点, 非请求者路径上的航点)
   // 如果直接邻居被占据，也尝试推占据者让路
   std::string blocker_dest;
   std::vector<RetreatChainStep> blocker_clear_steps;
-  for (const auto & nb : traffic_->get_waypoint_connections(from_wp)) {
-    if (nb == to_wp || nb == best_retreat || blocked_set.count(nb)) continue;
+  for (const auto & nb : traffic_->get_waypoint_connections(to_wp)) {
+    if (nb == from_wp || (!best_retreat.empty() && nb == best_retreat) || blocked_set.count(nb)) continue;
+    auto direct_blocker = occupancy_->can_enter(blocker, to_wp, nb);
+    if (!direct_blocker.empty() && direct_blocker != blocker) continue;
     auto nb_holder = occupancy_->get_zone_holder(nb);
     if (nb_holder.empty()) { blocker_dest = nb; break; }
     // 被占据 → 递归推占据者让路
     if (is_robot_stationary(nb_holder)) {
       std::set<std::string> push_excluded = blocked_set;
       push_excluded.insert(from_wp);
-      push_excluded.insert(best_retreat);
+      if (!best_retreat.empty()) push_excluded.insert(best_retreat);
       push_excluded.insert(to_wp);
       std::set<std::string> push_visited;
       if (try_push_occupant(nb, push_excluded, push_visited, 0, blocker_clear_steps)) {
@@ -1210,9 +1347,10 @@ bool FleetManagerNode::try_build_retreat_chain(
     }
   }
   if (blocker_dest.empty()) {
-    // 统一图感知安全搜索: 排除 to_wp 和 best_retreat
-    std::set<std::string> fallback_exclude = {to_wp, best_retreat};
-    blocker_dest = find_safe_free_waypoint(from_wp, fallback_exclude, blocker);
+    // 统一图感知安全搜索: 从阻塞点出发找出口，排除请求者当前点和撤退点
+    std::set<std::string> fallback_exclude = {from_wp};
+    if (!best_retreat.empty()) fallback_exclude.insert(best_retreat);
+    blocker_dest = find_safe_free_waypoint(to_wp, fallback_exclude, blocker);
     if (blocker_dest.empty()) {
       PersistLogger::log_warn("nav.chain_fallback_empty", requester, "",
         "from=" + from_wp + " best_retreat=" + best_retreat + " to_wp=" + to_wp,
@@ -1221,7 +1359,8 @@ bool FleetManagerNode::try_build_retreat_chain(
   }
   if (blocker_dest.empty()) {
     PersistLogger::log_warn("nav.chain_no_blocker_exit", requester, "",
-      "cannot find blocker exit from " + from_wp + " (best_retreat=" + best_retreat + " to_wp=" + to_wp + ")",
+      "cannot find blocker exit from " + to_wp + " (requester_from=" + from_wp +
+      " best_retreat=" + best_retreat + ")",
       __FILE__, __LINE__, __func__);
     chain_plan_.steps.clear();
     return false;
@@ -1407,10 +1546,10 @@ void FleetManagerNode::abort_chain(const std::string & reason)
   chain_plan_.steps.clear();
   chain_plan_.current_step = 0;
 
-  // 恢复所有已保存任务(保留绑定)
+  // 恢复所有已保存任务；非 fixed 任务释放旧绑定，避免反复回到同一瓶颈
   for (const auto & [rid, tid] : saved_tasks) {
     if (tid.empty()) continue;
-    scheduler_->mark_task_pending_preserve(tid);
+    scheduler_->mark_task_pending(tid);
     fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(tid);
     if (!ti.task_id.empty()) task_pub_->publish(ti);
   }

@@ -17,6 +17,8 @@ namespace fleet_manager
 // ============================================================================
 
 enum class LocationType { WAYPOINT, SEGMENT, UNKNOWN };
+enum class ResourceOwnerState { FREE, RESERVED, OCCUPIED, GHOST, CONFLICT };
+enum class RobotResourceState { UNKNOWN, IDLE, RESERVED, MOVING, WAITING, EXECUTING, GHOST, CONFLICT };
 
 struct DiscreteLocation
 {
@@ -131,9 +133,20 @@ public:
   std::set<std::string> get_occupied_zones() const;
 
   std::map<std::string, DiscreteLocation> get_all_locations() const;
+  std::map<std::string, std::set<std::string>> get_conflict_hubs() const;
+  std::map<std::string, std::set<std::string>> get_conflict_edges() const;
+  RobotResourceState get_robot_resource_state(const std::string & robot_id) const;
 
 private:
   static std::string edge_key(const std::string & a, const std::string & b);
+  static std::string conflict_key(const std::string & hub, const std::set<std::string> & holders);
+  static std::string first_other_holder(const std::set<std::string> & holders, const std::string & robot_id);
+  static std::string resource_state_name(ResourceOwnerState state);
+  static std::string robot_state_name(RobotResourceState state);
+
+  std::set<std::string> hubs_for_location(const DiscreteLocation & loc) const;
+  void rebuild_resource_state();
+  void set_robot_state(const std::string & robot_id, RobotResourceState state);
 
   double point_to_segment_distance(
     double px, double py, double x1, double y1, double x2, double y2) const;
@@ -154,6 +167,14 @@ private:
   std::map<std::string, rclcpp::Time> reservation_times_;   // 底盘 → 预留时间
 
   std::map<std::string, DiscreteLocation> robot_locations_; // 底盘 → 离散位置
+  std::map<std::string, std::set<std::string>> physical_hubs_;
+  std::map<std::string, std::set<std::string>> physical_edges_;
+  std::map<std::string, std::set<std::string>> ghost_hubs_;
+  std::map<std::string, std::set<std::string>> conflict_hubs_;
+  std::map<std::string, std::set<std::string>> conflict_edges_;
+  std::map<std::string, std::set<std::string>> edge_reservations_;
+  std::map<std::string, RobotResourceState> robot_states_;
+  std::set<std::string> active_conflict_keys_;
 
   std::map<std::string, rclcpp::Time> ghost_locks_;         // 底盘 → 幽灵锁开始时间
 

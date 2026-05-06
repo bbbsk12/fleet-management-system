@@ -118,6 +118,26 @@ struct ChainRetreatPlan
   int step_retry_count{0};             // 当前步骤的重试次数
 };
 
+enum class TaskWaitState
+{
+  NONE,
+  WAIT_BLOCKER_RELEASE,
+  WAIT_TARGET_CLEAR,
+  SELF_RELOCATING
+};
+
+struct TaskWaitCondition
+{
+  TaskWaitState state{TaskWaitState::NONE};
+  std::string robot_id;
+  std::string task_id;
+  std::string blocker_id;
+  std::string from_wp;
+  std::string to_wp;
+  std::string target_wp;
+  int retreat_count{0};
+};
+
 // ============================================================================
 // FleetManagerNode — 车队调度中枢节点
 // ============================================================================
@@ -352,6 +372,7 @@ private:
 
   // 事件驱动等待: blocker → 等待它的请求者列表
   std::map<std::string, std::set<std::string>> waiting_for_;
+  std::map<std::string, TaskWaitCondition> task_waits_;
 
   fleet_msgs::msg::FleetStatus last_fleet_;      // 最新车队状态快照
   bool has_fleet_{false};                        // 是否已收到过车队状态

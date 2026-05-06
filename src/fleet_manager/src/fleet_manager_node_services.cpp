@@ -4,6 +4,24 @@
 namespace fleet_manager
 {
 
+namespace
+{
+std::string robot_resource_status(RobotResourceState state)
+{
+  switch (state) {
+    case RobotResourceState::CONFLICT: return "conflict";
+    case RobotResourceState::GHOST: return "ghost";
+    case RobotResourceState::MOVING: return "moving";
+    case RobotResourceState::RESERVED: return "reserved";
+    case RobotResourceState::WAITING: return "waiting";
+    case RobotResourceState::EXECUTING: return "executing";
+    case RobotResourceState::IDLE: return "idle";
+    case RobotResourceState::UNKNOWN: return "";
+  }
+  return "";
+}
+}  // namespace
+
 // ============================================================================
 // ROS2 服务实现
 // ============================================================================
@@ -161,6 +179,8 @@ void FleetManagerNode::publish_traffic_fleet_status()
 
   // 注入交通管制信息: nav_status / planned_route / current_task_id
   for (auto & [id, st] : robots_) {
+    auto resource_status = robot_resource_status(occupancy_->get_robot_resource_state(id));
+    if (resource_status == "conflict" || resource_status == "ghost") st.nav_status = resource_status;
     if (is_robot_executing(id)) st.nav_status = "executing";
 
     auto ni = navs_.find(id);
