@@ -438,18 +438,51 @@ void FleetManagerNode::assign_pending_tasks()
   scheduler_->repair_queue();
   auto has_active_waiters = [&](const std::string & blocker_id) {
     for (const auto & [_, wait] : task_waits_) {
-      if (wait.blocker_id == blocker_id) return true;
+      if (wait.blocker_id != blocker_id) continue;
+      bool still_blocking = false;
+      if (wait.state == TaskWaitState::WAIT_TARGET_CLEAR) {
+        still_blocking = occupancy_->waypoint_blocker(wait.robot_id, wait.target_wp) == blocker_id;
+      } else if (!wait.from_wp.empty() && !wait.to_wp.empty()) {
+        still_blocking = occupancy_->can_enter(wait.robot_id, wait.from_wp, wait.to_wp) == blocker_id;
+      }
+      if (still_blocking) return true;
     }
     auto it = waiting_for_.find(blocker_id);
     if (it == waiting_for_.end()) return false;
-    for (const auto & waiter_id : it->second) {
+    for (auto waiter_it = it->second.begin(); waiter_it != it->second.end(); ) {
+      const auto waiter_id = *waiter_it;
       auto wi = navs_.find(waiter_id);
+      bool still_blocking = false;
+      std::string actual_blocker;
       if (wi != navs_.end() && wi->second &&
           !wi->second->current_task_id.empty() &&
           !wi->second->route.empty()) {
+        size_t target = std::min(wi->second->route_index, wi->second->route.size() - 1);
+        std::string to = wi->second->route[target];
+        std::string from;
+        if (target > 0) {
+          from = wi->second->route[target - 1];
+        } else {
+          auto st = robots_.find(waiter_id);
+          if (st != robots_.end()) {
+            from = st->second.current_waypoint;
+            if (from.empty()) from = traffic_->find_nearest_waypoint(st->second.current_pose);
+          }
+        }
+        if (!from.empty() && from != to) {
+          actual_blocker = occupancy_->can_enter(waiter_id, from, to);
+          still_blocking = actual_blocker == blocker_id;
+        }
+      }
+      if (still_blocking) {
         return true;
       }
+      if (!actual_blocker.empty() && actual_blocker != blocker_id) {
+        waiting_for_[actual_blocker].insert(waiter_id);
+      }
+      waiter_it = it->second.erase(waiter_it);
     }
+    if (it->second.empty()) waiting_for_.erase(it);
     return false;
   };
   auto target_has_active_task = [&](const std::string & target_wp,
@@ -881,7 +914,11 @@ void FleetManagerNode::assign_pending_tasks()
       reason, __FILE__, __LINE__, __func__);
     scheduler_->mark_task_pending(t.task_id);
     auto defer_ni = get_or_create_nav(t.assigned_robot_id);
-    if (defer_ni) {
+    if (defer_ni &&
+        !defer_ni->has_active_goal &&
+        defer_ni->current_task_id.empty() &&
+        defer_ni->route.empty() &&
+        !defer_ni->chassis_task_sent) {
       defer_ni->retry_after = now + rclcpp::Duration::from_seconds(retry_sec);
     }
     fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(t.task_id);
@@ -1024,7 +1061,6 @@ void FleetManagerNode::assign_pending_tasks()
     if (ni && (ni->has_active_goal || !ni->route.empty() ||
                !ni->current_task_id.empty() || ni->chassis_task_sent)) {
       scheduler_->mark_task_waiting(t.task_id);
-      ni->retry_after = now + rclcpp::Duration::from_seconds(3.0);
       fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(t.task_id);
       if (!ti.task_id.empty()) task_pub_->publish(ti);
       continue;
@@ -1371,18 +1407,31 @@ void FleetManagerNode::wake_waiters(const std::string & blocker_id)
   waiting_for_.erase(it);
 
   std::vector<std::string> ready_tasks;
+  std::map<std::string, std::string> wait_blocker_updates;
   for (const auto & [task_id, wait] : task_waits_) {
     if (wait.blocker_id != blocker_id) continue;
     bool ready = false;
+    std::string actual_blocker;
     if (wait.state == TaskWaitState::WAIT_TARGET_CLEAR) {
-      ready = occupancy_->waypoint_blocker(wait.robot_id, wait.target_wp).empty();
+      actual_blocker = occupancy_->waypoint_blocker(wait.robot_id, wait.target_wp);
+      ready = actual_blocker.empty();
     } else if (wait.from_wp.empty() || wait.to_wp.empty()) {
       ready = true;
     } else {
-      auto blocker = occupancy_->can_enter(wait.robot_id, wait.from_wp, wait.to_wp);
-      ready = blocker.empty() || blocker != blocker_id;
+      actual_blocker = occupancy_->can_enter(wait.robot_id, wait.from_wp, wait.to_wp);
+      ready = actual_blocker.empty() || actual_blocker != blocker_id;
     }
-    if (ready) ready_tasks.push_back(task_id);
+    if (ready) {
+      ready_tasks.push_back(task_id);
+    } else {
+      const std::string next_blocker = actual_blocker.empty() ? blocker_id : actual_blocker;
+      waiting_for_[next_blocker].insert(wait.robot_id);
+      if (next_blocker != blocker_id) wait_blocker_updates[task_id] = next_blocker;
+    }
+  }
+  for (const auto & [task_id, next_blocker] : wait_blocker_updates) {
+    auto wait_it = task_waits_.find(task_id);
+    if (wait_it != task_waits_.end()) wait_it->second.blocker_id = next_blocker;
   }
   for (const auto & task_id : ready_tasks) {
     auto wait = task_waits_[task_id];
@@ -1416,6 +1465,20 @@ void FleetManagerNode::wake_waiters(const std::string & blocker_id)
     if (!from.empty() && from != to) {
       auto blocker = occupancy_->can_enter(waiter_id, from, to);
       if (!blocker.empty()) {
+        auto blocker_ni = get_or_create_nav(blocker);
+        bool blocker_idle = blocker_ni &&
+          !blocker_ni->has_active_goal &&
+          blocker_ni->current_task_id.empty() &&
+          blocker_ni->route.empty() &&
+          !blocker_ni->chassis_task_sent;
+        if (is_internal_task_id(ni->current_task_id) && blocker_idle) {
+          ni->retry_after = rclcpp::Time{};
+          PersistLogger::log_info("sched.waiter_retry_idle_blocker", waiter_id, ni->current_task_id,
+            "next hop " + from + "->" + to + " still blocked by idle " + blocker,
+            __FILE__, __LINE__, __func__);
+          navigate_to_next_waypoint(waiter_id);
+          continue;
+        }
         waiting_for_[blocker].insert(waiter_id);
         PersistLogger::log_info("sched.waiter_still_blocked", waiter_id, ni->current_task_id,
           "next hop " + from + "->" + to + " still blocked by " + blocker,

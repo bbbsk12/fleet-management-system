@@ -215,7 +215,15 @@ void FleetManagerNode::navigate_to_next_waypoint(const std::string & robot_id)
     }
   }
   ni->route_index = target;
-  if (ni->route_index >= n) return;
+  if (ni->route_index >= n) {
+    std::string task_id = ni->current_task_id;
+    if (chain_plan_.active && task_id.rfind(kChainTaskPrefix, 0) == 0) {
+      on_chain_step_complete(robot_id, true);
+    } else {
+      on_nav_succeeded(robot_id, task_id);
+    }
+    return;
+  }
 
   std::string wp     = ni->route[target];
   bool is_final      = (target == n - 1);
@@ -365,6 +373,59 @@ void FleetManagerNode::navigate_to_next_waypoint(const std::string & robot_id)
       }
 
       if (is_internal_task_id(ni->current_task_id)) {
+        bool blocker_truly_idle = blocker_ni &&
+          blocker_ni->current_task_id.empty() && blocker_ni->route.empty();
+        if (!chain_plan_.active && blocker_truly_idle) {
+          std::set<std::string> final_exclude(ni->route.begin(), ni->route.end());
+          for (const auto & existing : scheduler_->get_all_tasks()) {
+            if (existing.task_id.empty() || existing.task_id == ni->current_task_id) continue;
+            if (existing.waypoint_id.empty()) continue;
+            if (existing.status == "completed" || existing.status == "failed" ||
+                existing.status == "cancelled" || existing.status == "pending") {
+              continue;
+            }
+            final_exclude.insert(existing.waypoint_id);
+          }
+          std::vector<std::string> avoid_path;
+          double best_cost = std::numeric_limits<double>::max();
+          auto all_wps = traffic_->get_all_waypoint_poses();
+          auto from_pose = traffic_->get_waypoint_pose(wp);
+          for (const auto & [candidate, pose] : all_wps) {
+            if (candidate == wp || final_exclude.count(candidate)) continue;
+            if (!occupancy_->is_zone_free_for(blocker, candidate)) continue;
+            auto path = traffic_->find_path(wp, candidate);
+            if (path.size() < 2) continue;
+            bool blocked_path = false;
+            for (size_t i = 1; i < path.size(); ++i) {
+              auto hop_blocker = occupancy_->can_enter(blocker, path[i - 1], path[i]);
+              if (!hop_blocker.empty() && hop_blocker != blocker) {
+                blocked_path = true;
+                break;
+              }
+            }
+            if (blocked_path) continue;
+            const double dist = std::hypot(
+              pose.position.x - from_pose.position.x,
+              pose.position.y - from_pose.position.y);
+            const double cost = static_cast<double>(path.size()) * 10.0 + dist;
+            if (cost < best_cost) {
+              best_cost = cost;
+              avoid_path = path;
+            }
+          }
+          if (avoid_path.size() >= 2) {
+            PersistLogger::log_info("nav.internal_avoid_push_blocker", robot_id, ni->current_task_id,
+              "asking idle blocker " + blocker + " to move path=" + join_waypoints(avoid_path),
+              __FILE__, __LINE__, __func__);
+            blocker_ni->route = avoid_path;
+            blocker_ni->route_index = 0;
+            blocker_ni->current_task_id = "avoidance_" + blocker;
+            blocker_ni->retry_count = 0;
+            blocker_ni->retry_after = rclcpp::Time{};
+            navigate_to_next_waypoint(blocker);
+            return;
+          }
+        }
         if (chain_plan_.active && ni->retry_count > retry_max_) {
           abort_chain("internal coordination step blocked from " + from + " to " + wp +
             " by " + blocker);
@@ -479,17 +540,17 @@ void FleetManagerNode::navigate_to_next_waypoint(const std::string & robot_id)
                 PersistLogger::log_warn("nav.avoid_reserve_failed", robot_id, ni->current_task_id,
                   "could not reserve " + avoid_wp + " for blocker " + blocker,
                   __FILE__, __LINE__, __func__);
-                avoid_wp.clear();  // 预留失败，放弃此避让
+              } else {
+                PersistLogger::log_info("nav.avoid_idle_blocker", robot_id, ni->current_task_id,
+                  "asking idle blocker " + blocker + " to move from " + wp + " to " + avoid_wp,
+                  __FILE__, __LINE__, __func__);
+                blocker_ni->route = {avoid_wp};
+                blocker_ni->route_index = 0;
+                blocker_ni->current_task_id = "avoidance_" + blocker;
+                blocker_ni->retry_count = 0;
+                blocker_ni->retry_after = rclcpp::Time{};
+                navigate_to_waypoint(blocker, avoid_wp, blocker_ni->current_task_id, true);
               }
-              PersistLogger::log_info("nav.avoid_idle_blocker", robot_id, ni->current_task_id,
-                "asking idle blocker " + blocker + " to move from " + wp + " to " + avoid_wp,
-                __FILE__, __LINE__, __func__);
-              blocker_ni->route = {avoid_wp};
-              blocker_ni->route_index = 0;
-              blocker_ni->current_task_id = "avoidance_" + blocker;
-              blocker_ni->retry_count = 0;
-              blocker_ni->retry_after = rclcpp::Time{};
-              navigate_to_waypoint(blocker, avoid_wp, blocker_ni->current_task_id, true);
             }
           }      // end if (blocker_truly_idle)
         } // end else (blocker_online)
@@ -589,7 +650,10 @@ void FleetManagerNode::navigate_to_waypoint(
   if (!ni) return;
 
   const auto now = this->now();
-  if (ni->recent_cancel_until.nanoseconds() > 0 && now < ni->recent_cancel_until) return;
+  if (ni->recent_cancel_until.nanoseconds() > 0 && now < ni->recent_cancel_until) {
+    ni->retry_after = ni->recent_cancel_until;
+    return;
+  }
 
   // 取消旧 goal
   if (ni->goal_handle && ni->nav_client) {
@@ -807,6 +871,7 @@ void FleetManagerNode::check_arrivals()
           on_nav_succeeded(rid, task_id);
         } else {
           ni->route_index = target_index + 1;
+          ni->retry_after = ni->recent_cancel_until;
           navigate_to_next_waypoint(rid);
         }
         continue;
