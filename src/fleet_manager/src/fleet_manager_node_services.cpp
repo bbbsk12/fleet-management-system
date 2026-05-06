@@ -148,7 +148,14 @@ void FleetManagerNode::publish_traffic_fleet_status()
 
   fleet_msgs::msg::FleetStatus out;
   out.timestamp = this->now();
-  out.pending_tasks = last_fleet_.pending_tasks;
+  // 截断 pending_tasks 防止压测时消息过大导致序列化失败
+  const size_t kMaxPendingTasks = 50;
+  if (last_fleet_.pending_tasks.size() > kMaxPendingTasks) {
+    out.pending_tasks.assign(last_fleet_.pending_tasks.begin(),
+                             last_fleet_.pending_tasks.begin() + kMaxPendingTasks);
+  } else {
+    out.pending_tasks = last_fleet_.pending_tasks;
+  }
   out.active_tasks = last_fleet_.active_tasks;
   out.system_status = last_fleet_.system_status;
 

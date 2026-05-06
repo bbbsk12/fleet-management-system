@@ -1,6 +1,7 @@
 /log/
 /install/
 /build/
+/test_logs/
 # Claw Code local artifacts
 .claw/settings.local.json
 .claw/sessions/

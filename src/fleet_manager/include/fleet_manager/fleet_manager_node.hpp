@@ -290,6 +290,14 @@ private:
   // 工具函数
   // ========================================================================
 
+  /// 事件驱动唤醒: 当 blocker 完成任务时，唤醒所有等待它的请求者
+  void wake_waiters(const std::string & blocker_id);
+
+  /// 图感知搜索: 找最近空闲且路径上无占用的航点 (统一函数)
+  std::string find_safe_free_waypoint(const std::string & from_wp,
+      const std::set<std::string> & exclude,
+      const std::string & self_robot = "") const;
+
   void cancel_goals(const std::shared_ptr<RobotNavInfo> & ni);
   void cancel_all_goals();
   void stop_robot(const std::string & robot_id, int burst = 10);
@@ -341,6 +349,9 @@ private:
   std::map<std::string, fleet_msgs::msg::RobotStatus> robots_; // 所有已知底盘
   std::map<std::string, std::shared_ptr<RobotNavInfo>> navs_;  // 导航上下文
   std::set<std::string> removed_;                               // 已移除的底盘黑名单
+
+  // 事件驱动等待: blocker → 等待它的请求者列表
+  std::map<std::string, std::set<std::string>> waiting_for_;
 
   fleet_msgs::msg::FleetStatus last_fleet_;      // 最新车队状态快照
   bool has_fleet_{false};                        // 是否已收到过车队状态

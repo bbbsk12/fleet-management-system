@@ -101,11 +101,11 @@ std::vector<fleet_msgs::msg::TaskInfo> TaskScheduler::assign_tasks_batch(
   for (const auto & r : robots)
     if (r.connection_status == "online") avail.insert(r.robot_id);
 
-  // 排除已有执行类任务的底盘
+  // 排除已有未完成任务的底盘(一个底盘同时只挂起一个任务)
   for (const auto & [_, t] : all_) {
     if (t.assigned_robot_id.empty()) continue;
     if (is_finished(t.status)) continue;
-    if (is_like_executing(t.status)) avail.erase(t.assigned_robot_id);
+    avail.erase(t.assigned_robot_id);
   }
 
   // 将队列按优先级弹出到 pending 向量
@@ -229,7 +229,6 @@ void TaskScheduler::mark_task_waiting(const std::string & task_id)
   auto it = all_.find(task_id);
   if (it == all_.end() || is_finished(it->second.status)) return;
   it->second.status = "waiting_fleet";
-  retry_cycle_count_[task_id]++;  // 每次进入 waiting_fleet 累加重试计数
 }
 
 void TaskScheduler::mark_task_pending(const std::string & task_id)

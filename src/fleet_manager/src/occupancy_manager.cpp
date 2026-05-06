@@ -109,10 +109,16 @@ DiscreteLocation OccupancyManager::update_location(
     else ++it;
   }
 
-  // 设置新 zone_locks — 绝不覆盖其他底盘的锁(碰撞告警)
-  auto safe_set = [&](const std::string & wp) {
+  // 设置新 zone_locks — 航点优先：静止机器人优先于段上机器人
+  auto safe_set = [&](const std::string & wp, bool is_waypoint) {
     auto existing = zone_locks_.find(wp);
     if (existing == zone_locks_.end() || existing->second == robot_id) {
+      zone_locks_[wp] = robot_id;
+    } else if (is_waypoint) {
+      // 静止在航点上的机器人优先级最高，强制接管
+      PersistLogger::log_warn("occ.zone_takeover", robot_id, "",
+        "waypoint robot taking wp=" + wp + " from " + existing->second,
+        __FILE__, __LINE__, __func__);
       zone_locks_[wp] = robot_id;
     } else {
       PersistLogger::log_error(
@@ -123,20 +129,24 @@ DiscreteLocation OccupancyManager::update_location(
   };
 
   if (loc.type == LocationType::WAYPOINT) {
-    safe_set(loc.waypoint_id);
+    safe_set(loc.waypoint_id, true);
   } else if (loc.type == LocationType::SEGMENT) {
-    safe_set(loc.segment_from);
-    safe_set(loc.segment_to);
+    safe_set(loc.segment_from, false);
+    safe_set(loc.segment_to, false);
   }
 
   robot_locations_[robot_id] = loc;
 
-  // 到达预留航点时自动清除预留
+  // 到达预留航点时从集合中移除该航点
   auto res_it = reservations_.find(robot_id);
   if (res_it != reservations_.end()) {
-    if ((loc.type == LocationType::WAYPOINT && loc.waypoint_id == res_it->second) ||
-        (loc.type == LocationType::SEGMENT &&
-         (loc.segment_from == res_it->second || loc.segment_to == res_it->second))) {
+    if (loc.type == LocationType::WAYPOINT)
+      res_it->second.erase(loc.waypoint_id);
+    else if (loc.type == LocationType::SEGMENT) {
+      res_it->second.erase(loc.segment_from);
+      res_it->second.erase(loc.segment_to);
+    }
+    if (res_it->second.empty()) {
       reservations_.erase(res_it);
       reservation_times_.erase(robot_id);
     }
@@ -185,10 +195,10 @@ std::string OccupancyManager::can_enter(
   auto zl = zone_locks_.find(to_wp);
   if (zl != zone_locks_.end() && zl->second != robot_id) return zl->second;
 
-  // 预留检查 (其他底盘的预约)
-  for (const auto & [rid, wp] : reservations_) {
+  // 预留检查 (其他底盘的预约，遍历集合)
+  for (const auto & [rid, wps] : reservations_) {
     if (rid == robot_id) continue;
-    if (wp == to_wp) return rid;
+    if (wps.count(to_wp)) return rid;
   }
 
   return "";  // 畅通
@@ -201,9 +211,9 @@ std::string OccupancyManager::waypoint_blocker(
   if (wp_id.empty()) return "";
   auto zl = zone_locks_.find(wp_id);
   if (zl != zone_locks_.end() && zl->second != robot_id) return zl->second;
-  for (const auto & [rid, wp] : reservations_) {
+  for (const auto & [rid, wps] : reservations_) {
     if (rid == robot_id) continue;
-    if (wp == wp_id) return rid;
+    if (wps.count(wp_id)) return rid;
   }
   return "";
 }
@@ -226,7 +236,7 @@ bool OccupancyManager::reserve_next(
     return false;
   }
 
-  reservations_[robot_id]     = to_wp;
+  reservations_[robot_id].insert(to_wp);
   reservation_times_[robot_id] = node_->now();
   return true;
 }
@@ -283,9 +293,9 @@ bool OccupancyManager::is_zone_free_for(
 {
   auto zl = zone_locks_.find(wp_id);
   if (zl != zone_locks_.end() && zl->second != robot_id) return false;
-  for (const auto & [rid, wp] : reservations_) {
+  for (const auto & [rid, wps] : reservations_) {
     if (rid == robot_id) continue;
-    if (wp == wp_id) return false;
+    if (wps.count(wp_id)) return false;
   }
   return true;
 }
@@ -333,7 +343,8 @@ std::set<std::string> OccupancyManager::get_occupied_zones() const
 {
   std::set<std::string> s;
   for (const auto & [wp, _] : zone_locks_) s.insert(wp);
-  for (const auto & [_, wp] : reservations_) s.insert(wp);
+  for (const auto & [_, wps] : reservations_)
+    for (const auto & wp : wps) s.insert(wp);
   return s;
 }
 

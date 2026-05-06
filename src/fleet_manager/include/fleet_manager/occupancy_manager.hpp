@@ -150,7 +150,7 @@ private:
   std::set<std::pair<std::string, std::string>> all_edges_;
 
   std::map<std::string, std::string> zone_locks_;           // 航点 → 占用底盘
-  std::map<std::string, std::string> reservations_;         // 底盘 → 预留航点
+  std::map<std::string, std::set<std::string>> reservations_; // 底盘 → 预留航点集合
   std::map<std::string, rclcpp::Time> reservation_times_;   // 底盘 → 预留时间
 
   std::map<std::string, DiscreteLocation> robot_locations_; // 底盘 → 离散位置
