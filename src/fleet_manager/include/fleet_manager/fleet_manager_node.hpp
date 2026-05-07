@@ -44,6 +44,7 @@ using NavigateToPose       = nav2_msgs::action::NavigateToPose;
 using NavigateThroughPoses = nav2_msgs::action::NavigateThroughPoses;
 using FollowWaypoints      = nav2_msgs::action::FollowWaypoints;
 using GoalHandleNavigate   = rclcpp_action::ClientGoalHandle<NavigateToPose>;
+using GoalHandleNavigateThrough = rclcpp_action::ClientGoalHandle<NavigateThroughPoses>;
 
 // ============================================================================
 // 机器人导航状态 — 每台底盘维护一份，记录当前导航任务的所有上下文
@@ -54,6 +55,10 @@ struct RobotNavInfo
   // ── Nav2 导航 ──
   rclcpp_action::Client<NavigateToPose>::SharedPtr nav_client;  // Nav2 action 客户端
   GoalHandleNavigate::SharedPtr goal_handle;                    // 当前活跃 goal 的句柄
+  rclcpp_action::Client<NavigateThroughPoses>::SharedPtr align_client;
+  GoalHandleNavigateThrough::SharedPtr align_goal_handle;
+  bool aligning_before_nav{false};
+  bool route_alignment_done{false};
   bool has_active_goal{false};                                  // 是否有正在执行的导航指令
   uint64_t nav_seq{0};                                          // 导航序列号(取消旧 goal 时递增)
   rclcpp::Time nav_since;                                       // 当前 goal 开始时间(卡死检测用)
@@ -227,7 +232,8 @@ private:
   void navigate_to_waypoint(const std::string & robot_id,
                             const std::string & wp_id,
                             const std::string & task_id,
-                            bool is_final);
+                            bool is_final,
+                            bool alignment_done = false);
 
   /// Nav2 goal 成功到达的回调: CRUISE 任务完成; LOAD/UNLOAD 任务转底盘执行
   void on_nav_succeeded(const std::string & robot_id,

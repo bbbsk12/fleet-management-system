@@ -185,8 +185,15 @@ bool FleetManagerNode::start_navigation(
     }
   }
 
+  if (ni->has_active_goal || ni->goal_handle || ni->align_goal_handle || ni->aligning_before_nav) {
+    cancel_goals(ni);
+  } else {
+    ni->nav_seq++;
+  }
+
   ni->route       = path;
   ni->route_index = 0;
+  ni->route_alignment_done = false;
   ni->current_task_id = task_id;
   ni->retry_count = 0;
   ni->retry_after = rclcpp::Time{};
@@ -227,6 +234,33 @@ void FleetManagerNode::navigate_to_next_waypoint(const std::string & robot_id)
   // 根据底盘实际位姿跳过已物理到达的航点
   size_t target = ni->route_index;
   if (st != robots_.end()) {
+    if (target == 0 && n > 1) {
+      const std::string & route_start = ni->route.front();
+      bool at_route_start = st->second.current_waypoint == route_start;
+      auto loc = occupancy_->get_location(robot_id);
+      if (!at_route_start && loc.type == LocationType::WAYPOINT) {
+        at_route_start = loc.waypoint_id == route_start;
+      }
+      if (!at_route_start && loc.type == LocationType::SEGMENT) {
+        at_route_start = loc.segment_from == route_start || loc.segment_to == route_start;
+      }
+      if (!at_route_start) {
+        const auto nearest = traffic_->find_nearest_waypoint(st->second.current_pose);
+        if (nearest == route_start) {
+          auto start_pose = traffic_->get_waypoint_pose(route_start);
+          double d = std::hypot(
+            st->second.current_pose.position.x - start_pose.position.x,
+            st->second.current_pose.position.y - start_pose.position.y);
+          at_route_start = d <= waypoint_radius_ * 2.5;
+        }
+      }
+      if (at_route_start) {
+        target = 1;
+        PersistLogger::log_info("nav.skip_route_start", robot_id, ni->current_task_id,
+          "skipping route start " + route_start + " toward " + ni->route[target],
+          __FILE__, __LINE__, __func__);
+      }
+    }
     while (target < n) {
       auto wp_pose = traffic_->get_waypoint_pose(ni->route[target]);
       double d = std::hypot(
@@ -357,6 +391,8 @@ void FleetManagerNode::navigate_to_next_waypoint(const std::string & robot_id)
               chain_plan_.started_at = this->now();
               chain_plan_.current_step = 0;
               chain_plan_.step_retry_count = 0;
+              cancel_goals(ni);
+              cancel_goals(blocker_ni);
               ni->has_active_goal = false;
               ni->route.clear();
               ni->route_index = 0;
@@ -447,6 +483,7 @@ void FleetManagerNode::navigate_to_next_waypoint(const std::string & robot_id)
               __FILE__, __LINE__, __func__);
             blocker_ni->route = avoid_path;
             blocker_ni->route_index = 0;
+            blocker_ni->route_alignment_done = false;
             blocker_ni->current_task_id = "avoidance_" + blocker;
             blocker_ni->retry_count = 0;
             blocker_ni->retry_after = rclcpp::Time{};
@@ -516,6 +553,8 @@ void FleetManagerNode::navigate_to_next_waypoint(const std::string & robot_id)
                 chain_plan_.step_retry_count = 0;
 
                 // 暂停请求者和阻塞者的导航
+                cancel_goals(ni);
+                cancel_goals(blocker_ni);
                 ni->has_active_goal = false;
                 ni->route.clear();
                 ni->route_index = 0;
@@ -574,6 +613,7 @@ void FleetManagerNode::navigate_to_next_waypoint(const std::string & robot_id)
                   __FILE__, __LINE__, __func__);
                 blocker_ni->route = {avoid_wp};
                 blocker_ni->route_index = 0;
+                blocker_ni->route_alignment_done = false;
                 blocker_ni->current_task_id = "avoidance_" + blocker;
                 blocker_ni->retry_count = 0;
                 blocker_ni->retry_after = rclcpp::Time{};
@@ -616,6 +656,8 @@ void FleetManagerNode::navigate_to_next_waypoint(const std::string & robot_id)
                   chain_plan_.started_at = this->now();
                   chain_plan_.current_step = 0;
                   chain_plan_.step_retry_count = 0;
+                  cancel_goals(ni);
+                  cancel_goals(blocker_ni);
                   ni->has_active_goal = false;
                   ni->route.clear();
                   ni->route_index = 0;
@@ -671,6 +713,7 @@ void FleetManagerNode::navigate_to_next_waypoint(const std::string & robot_id)
             ni->has_active_goal = false;
             ni->route = {retreat_wp};
             ni->route_index = 0;
+            ni->route_alignment_done = false;
             ni->current_task_id = "avoidance_" + robot_id;
             ni->retry_count = 0;
             ni->retry_after = rclcpp::Time{};
@@ -727,7 +770,8 @@ void FleetManagerNode::navigate_to_waypoint(
   const std::string & robot_id,
   const std::string & wp_id,
   const std::string & task_id,
-  bool is_final)
+  bool is_final,
+  bool alignment_done)
 {
   std::lock_guard<std::recursive_mutex> lock(mtx_);
   auto ni = get_or_create_nav(robot_id);
@@ -748,12 +792,120 @@ void FleetManagerNode::navigate_to_waypoint(
   }
 
   auto wp_pose = traffic_->get_waypoint_pose(wp_id);
+  auto st = robots_.find(robot_id);
+
+  if (!alignment_done && !ni->route_alignment_done) {
+    if (st == robots_.end() || st->second.connection_status != "online") {
+      ni->retry_after = now + rclcpp::Duration::from_seconds(0.5);
+      return;
+    }
+
+    const double dx = wp_pose.position.x - st->second.current_pose.position.x;
+    const double dy = wp_pose.position.y - st->second.current_pose.position.y;
+    const double dist = std::hypot(dx, dy);
+    if (dist > 1e-6) {
+      if (!ni->align_client || !ni->align_client->action_server_is_ready()) {
+        PersistLogger::log_warn("nav.align_not_ready", robot_id, task_id,
+          "NavigateThroughPoses server not ready", __FILE__, __LINE__, __func__);
+        ni->retry_after = now + rclcpp::Duration::from_seconds(0.5);
+        return;
+      }
+
+      geometry_msgs::msg::PoseStamped align_pose;
+      align_pose.header.frame_id = "map";
+      align_pose.header.stamp = now;
+      align_pose.pose.position = st->second.current_pose.position;
+      tf2::Quaternion q;
+      q.setRPY(0.0, 0.0, std::atan2(dy, dx));
+      q.normalize();
+      align_pose.pose.orientation.x = q.x();
+      align_pose.pose.orientation.y = q.y();
+      align_pose.pose.orientation.z = q.z();
+      align_pose.pose.orientation.w = q.w();
+
+      auto align_goal = NavigateThroughPoses::Goal();
+      align_goal.poses.push_back(align_pose);
+      align_goal.poses.push_back(align_pose);
+
+      auto align_opts = rclcpp_action::Client<NavigateThroughPoses>::SendGoalOptions();
+      uint64_t seq = ni->nav_seq;
+
+      align_opts.goal_response_callback =
+        [this, robot_id, task_id, seq](GoalHandleNavigateThrough::SharedPtr gh) {
+          std::lock_guard<std::recursive_mutex> l(mtx_);
+          auto n = get_or_create_nav(robot_id);
+          if (!n || n->nav_seq != seq || n->current_task_id != task_id) return;
+          if (!gh) {
+            n->has_active_goal = false;
+            n->aligning_before_nav = false;
+            PersistLogger::log_warn("nav.align_rejected", robot_id, n->current_task_id,
+              "NavigateThroughPoses rejected", __FILE__, __LINE__, __func__);
+          } else {
+            n->align_goal_handle = gh;
+            n->nav_last_activity = this->now();
+          }
+        };
+
+      align_opts.result_callback =
+        [this, robot_id, wp_id, task_id, is_final, seq](
+          const GoalHandleNavigateThrough::WrappedResult & r) {
+          std::lock_guard<std::recursive_mutex> l(mtx_);
+          auto n = get_or_create_nav(robot_id);
+          if (!n || n->nav_seq != seq || n->current_task_id != task_id) return;
+
+          n->has_active_goal = false;
+          n->aligning_before_nav = false;
+          n->align_goal_handle.reset();
+
+          if (r.code == rclcpp_action::ResultCode::SUCCEEDED) {
+            n->route_alignment_done = true;
+            PersistLogger::log_info("nav.align_succeeded", robot_id, task_id,
+              "aligned before navigating to " + wp_id, __FILE__, __LINE__, __func__);
+            navigate_to_waypoint(robot_id, wp_id, task_id, is_final, true);
+          } else if (r.code == rclcpp_action::ResultCode::CANCELED) {
+          } else {
+            PersistLogger::log_warn("nav.align_failed", robot_id, task_id,
+              "align result code=" + std::to_string(static_cast<int>(r.code)),
+              __FILE__, __LINE__, __func__);
+            n->retry_count++;
+            if (n->retry_count <= 3) {
+              navigate_to_next_waypoint(robot_id);
+            } else {
+              std::string tid = task_id;
+              occupancy_->release_reservations(robot_id);
+              n->current_task_id.clear();
+              n->route.clear();
+              n->route_index = 0;
+              n->retry_count = 0;
+              if (scheduler_->would_exceed_retry_cycles(tid, max_task_retry_cycles_)) {
+                scheduler_->fail_task(tid, "alignment failed repeatedly, max retry cycles exceeded");
+                fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(tid);
+                if (!ti.task_id.empty()) task_pub_->publish(ti);
+                finalize_task_completion(robot_id, tid);
+              } else {
+                scheduler_->mark_task_pending(tid);
+                fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(tid);
+                if (!ti.task_id.empty()) task_pub_->publish(ti);
+              }
+            }
+          }
+        };
+
+      ni->has_active_goal = true;
+      ni->aligning_before_nav = true;
+      ni->nav_since = now;
+      ni->nav_last_activity = now;
+      PersistLogger::log_info("nav.align_start", robot_id, task_id,
+        "aligning toward " + wp_id, __FILE__, __LINE__, __func__);
+      ni->align_client->async_send_goal(align_goal, align_opts);
+      return;
+    }
+  }
 
   geometry_msgs::msg::PoseStamped goal;
   goal.header.frame_id = "map";
   goal.header.stamp = now;
   goal.pose.position = wp_pose.position;
-  auto st = robots_.find(robot_id);
   if (st != robots_.end()) {
     const auto & q = st->second.current_pose.orientation;
     double norm = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
@@ -777,10 +929,10 @@ void FleetManagerNode::navigate_to_waypoint(
   uint64_t seq = ni->nav_seq;
 
   opts.goal_response_callback =
-    [this, robot_id, seq](GoalHandleNavigate::SharedPtr gh) {
+    [this, robot_id, task_id, seq](GoalHandleNavigate::SharedPtr gh) {
       std::lock_guard<std::recursive_mutex> l(mtx_);
       auto n = get_or_create_nav(robot_id);
-      if (!n || n->nav_seq != seq) return;
+      if (!n || n->nav_seq != seq || n->current_task_id != task_id) return;
       if (!gh) {
         n->has_active_goal = false;
         PersistLogger::log_warn("nav.rejected", robot_id, n->current_task_id,
@@ -795,7 +947,7 @@ void FleetManagerNode::navigate_to_waypoint(
     [this, robot_id, task_id, is_final, seq](const GoalHandleNavigate::WrappedResult & r) {
       std::lock_guard<std::recursive_mutex> l(mtx_);
       auto n = get_or_create_nav(robot_id);
-      if (!n || n->nav_seq != seq) return;
+      if (!n || n->nav_seq != seq || n->current_task_id != task_id) return;
 
       n->has_active_goal = false;
       n->goal_handle.reset();
@@ -851,6 +1003,7 @@ void FleetManagerNode::navigate_to_waypoint(
   }
 
   ni->has_active_goal = true;
+  ni->aligning_before_nav = false;
   ni->nav_since = now;
   ni->nav_last_activity = now;
   ni->recent_cancel_until = now + rclcpp::Duration::from_seconds(kNavCancelSettlingSec);
@@ -935,7 +1088,7 @@ void FleetManagerNode::check_arrivals()
 
     // === 位置到达检测: 物理位置在目标航点半径内 → 直接完成(不等 Nav2 orientation) ===
     auto st = robots_.find(rid);
-    if (st != robots_.end()) {
+    if (!ni->aligning_before_nav && st != robots_.end()) {
       size_t target_index = std::min(ni->route_index, ni->route.size() - 1);
       std::string target_wp = ni->route[target_index];
       auto target_pose = traffic_->get_waypoint_pose(target_wp);
@@ -1189,6 +1342,7 @@ void FleetManagerNode::finalize_task_completion(
   ni->has_active_goal = false;
   ni->route.clear();
   ni->route_index = 0;
+  ni->route_alignment_done = false;
   ni->retry_count = 0;
   ni->chassis_task_sent = false;
   ni->chassis_handshake_ok = false;
@@ -1218,6 +1372,23 @@ uint8_t FleetManagerNode::determine_led_state(const std::string & robot_id) cons
   if (ni == navs_.end() || !ni->second) return 3;  // 空闲
   if (ni->second->chassis_task_sent) return 2;      // 任务执行中
   if (ni->second->has_active_goal)  return 0;       // 行走中
+  bool traffic_wait = false;
+  for (const auto & [_, wait] : task_waits_) {
+    if (wait.robot_id == robot_id) {
+      traffic_wait = true;
+      break;
+    }
+  }
+  if (!traffic_wait) {
+    for (const auto & [_, waiters] : waiting_for_) {
+      if (waiters.count(robot_id)) {
+        traffic_wait = true;
+        break;
+      }
+    }
+  }
+  if (traffic_wait) return 1;                       // 交通等待
+  if (!ni->second->route.empty() && !ni->second->current_task_id.empty()) return 0;
   if (!ni->second->current_task_id.empty()) return 1; // 交通等待
   return 3;  // 空闲
 }
@@ -1230,12 +1401,10 @@ void FleetManagerNode::led_timer_callback()
     if (st == robots_.end() || st->second.connection_status != "online") continue;
 
     uint8_t s = determine_led_state(rid);
-    if (s != ni->last_led_state) {
-      fleet_msgs::msg::LEDTask msg;
-      msg.state = s;
-      ni->led_pub->publish(msg);
-      ni->last_led_state = s;
-    }
+    fleet_msgs::msg::LEDTask msg;
+    msg.state = s;
+    ni->led_pub->publish(msg);
+    ni->last_led_state = s;
   }
 }
 
@@ -1260,7 +1429,12 @@ void FleetManagerNode::cancel_goals(const std::shared_ptr<RobotNavInfo> & ni)
     ni->nav_client->async_cancel_goal(ni->goal_handle);
     ni->goal_handle.reset();
   }
+  if (ni->align_goal_handle && ni->align_client) {
+    ni->align_client->async_cancel_goal(ni->align_goal_handle);
+    ni->align_goal_handle.reset();
+  }
   ni->has_active_goal = false;
+  ni->aligning_before_nav = false;
   ni->nav_seq++;
 }
 
@@ -1293,6 +1467,8 @@ std::shared_ptr<RobotNavInfo> FleetManagerNode::get_or_create_nav(
   auto ni = std::make_shared<RobotNavInfo>();
   ni->nav_client = rclcpp_action::create_client<NavigateToPose>(
     this, "/" + robot_id + "/navigate_to_pose");
+  ni->align_client = rclcpp_action::create_client<NavigateThroughPoses>(
+    this, "/" + robot_id + "/navigate_through_poses");
   ni->task_cmd_pub = this->create_publisher<fleet_msgs::msg::TaskCmd>(
     "/" + robot_id + "/task/assign", 10);
   ni->task_fb_sub = this->create_subscription<fleet_msgs::msg::TaskFb>(
@@ -1572,6 +1748,12 @@ void FleetManagerNode::execute_chain_step()
     abort_chain("target waypoint not found: " + step.target_wp); return;
   }
 
+  if (ni->has_active_goal || ni->goal_handle || ni->align_goal_handle || ni->aligning_before_nav) {
+    cancel_goals(ni);
+  } else {
+    ni->nav_seq++;
+  }
+
   ni->current_task_id = std::string(kChainTaskPrefix) + step.robot_id;
   ni->retry_count = 0;
   ni->retry_after = rclcpp::Time{};
@@ -1598,6 +1780,7 @@ void FleetManagerNode::execute_chain_step()
   }
   ni->route = clean;
   ni->route_index = 0;
+  ni->route_alignment_done = false;
 
   PersistLogger::log_info("nav.chain_step", step.robot_id, ni->current_task_id,
     "step " + std::to_string(chain_plan_.current_step + 1) + "/" +

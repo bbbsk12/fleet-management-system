@@ -702,6 +702,7 @@ void FleetManagerNode::assign_pending_tasks()
             if (relocate_path.size() >= 2) {
               waiter_ni->route = relocate_path;
               waiter_ni->route_index = 0;
+              waiter_ni->route_alignment_done = false;
               waiter_ni->current_task_id = "avoidance_" + wait.robot_id;
               waiter_ni->retry_count = 0;
               waiter_ni->retry_after = rclcpp::Time{};
@@ -726,6 +727,7 @@ void FleetManagerNode::assign_pending_tasks()
         if (!holder_ni) continue;
         holder_ni->route = exit_path;
         holder_ni->route_index = 0;
+        holder_ni->route_alignment_done = false;
         holder_ni->current_task_id = "avoidance_" + target_holder;
         holder_ni->retry_count = 0;
         holder_ni->retry_after = rclcpp::Time{};
@@ -832,6 +834,7 @@ void FleetManagerNode::assign_pending_tasks()
       if (!blocker_ni) continue;
       blocker_ni->route = exit_path;
       blocker_ni->route_index = 0;
+      blocker_ni->route_alignment_done = false;
       blocker_ni->current_task_id = "avoidance_" + wait.blocker_id;
       blocker_ni->retry_count = 0;
       blocker_ni->retry_after = rclcpp::Time{};
@@ -1202,6 +1205,7 @@ void FleetManagerNode::assign_pending_tasks()
               __FILE__, __LINE__, __func__);
             holder_ni->route = {exit_wp};
             holder_ni->route_index = 0;
+            holder_ni->route_alignment_done = false;
             holder_ni->current_task_id = "avoidance_" + target_holder;
             holder_ni->retry_count = 0;
             holder_ni->retry_after = rclcpp::Time{};
@@ -1422,6 +1426,7 @@ void FleetManagerNode::deadlock_check()
           __FILE__, __LINE__, __func__);
         ni->second->route = {relocate_wp};
         ni->second->route_index = 0;
+        ni->second->route_alignment_done = false;
         ni->second->current_task_id = "relocate_" + victim;
         ni->second->retry_count = 0;
         ni->second->retry_after = rclcpp::Time{};
