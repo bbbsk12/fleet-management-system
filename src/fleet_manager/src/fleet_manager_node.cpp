@@ -441,9 +441,24 @@ void FleetManagerNode::assign_pending_tasks()
       if (wait.blocker_id != blocker_id) continue;
       bool still_blocking = false;
       if (wait.state == TaskWaitState::WAIT_TARGET_CLEAR) {
-        still_blocking = occupancy_->waypoint_blocker(wait.robot_id, wait.target_wp) == blocker_id;
+        auto target_blocker = occupancy_->waypoint_blocker(wait.robot_id, wait.target_wp);
+        if (target_blocker.empty()) {
+          target_blocker = physical_waypoint_blocker(wait.robot_id, wait.target_wp);
+        }
+        still_blocking = target_blocker == blocker_id;
+      } else if (wait.state == TaskWaitState::WAIT_ROUTE_CLEAR) {
+        auto path = plan_route_for_task(wait.robot_id, wait.target_wp);
+        std::string conflict_task;
+        std::string conflict_resource;
+        still_blocking =
+          find_active_route_conflict(wait.robot_id, wait.task_id, path,
+            conflict_task, conflict_resource) == blocker_id;
       } else if (!wait.from_wp.empty() && !wait.to_wp.empty()) {
-        still_blocking = occupancy_->can_enter(wait.robot_id, wait.from_wp, wait.to_wp) == blocker_id;
+        auto hop_blocker = occupancy_->can_enter(wait.robot_id, wait.from_wp, wait.to_wp);
+        if (hop_blocker.empty()) {
+          hop_blocker = physical_waypoint_blocker(wait.robot_id, wait.to_wp);
+        }
+        still_blocking = hop_blocker == blocker_id;
       }
       if (still_blocking) return true;
     }
@@ -471,6 +486,9 @@ void FleetManagerNode::assign_pending_tasks()
         }
         if (!from.empty() && from != to) {
           actual_blocker = occupancy_->can_enter(waiter_id, from, to);
+          if (actual_blocker.empty()) {
+            actual_blocker = physical_waypoint_blocker(waiter_id, to);
+          }
           still_blocking = actual_blocker == blocker_id;
         }
       }
@@ -512,10 +530,21 @@ void FleetManagerNode::assign_pending_tasks()
   auto wait_condition_ready = [&](const fleet_msgs::msg::TaskInfo & t) {
     auto it = task_waits_.find(t.task_id);
     if (it == task_waits_.end()) return true;
-    const auto & w = it->second;
+    auto & w = it->second;
     bool ready = false;
     if (w.state == TaskWaitState::WAIT_TARGET_CLEAR) {
       ready = occupancy_->waypoint_blocker(w.robot_id, w.target_wp).empty();
+    } else if (w.state == TaskWaitState::WAIT_ROUTE_CLEAR) {
+      auto path = plan_route_for_task(w.robot_id, w.target_wp);
+      std::string conflict_task;
+      std::string conflict_resource;
+      auto blocker = find_active_route_conflict(w.robot_id, w.task_id, path,
+        conflict_task, conflict_resource);
+      ready = blocker.empty();
+      if (!ready && blocker != w.blocker_id) {
+        w.blocker_id = blocker;
+        waiting_for_[blocker].insert(w.robot_id);
+      }
     } else if (w.state == TaskWaitState::WAIT_BLOCKER_RELEASE ||
                w.state == TaskWaitState::SELF_RELOCATING) {
       if (w.from_wp.empty() || w.to_wp.empty()) ready = true;
@@ -816,6 +845,28 @@ void FleetManagerNode::assign_pending_tasks()
   };
   progress_wait_conditions();
 
+  auto register_route_wait = [&](const std::string & rid,
+      const std::string & task_id,
+      const std::string & target_wp,
+      const std::vector<std::string> & path,
+      const std::string & blocker,
+      const std::string & conflict_task,
+      const std::string & conflict_resource,
+      const std::string & tag) {
+    if (task_id.empty() || blocker.empty()) return;
+    scheduler_->mark_task_waiting(task_id);
+    task_waits_[task_id] = {TaskWaitState::WAIT_ROUTE_CLEAR, rid, task_id,
+      blocker, path.empty() ? std::string{} : path.front(),
+      path.size() > 1 ? path[1] : std::string{}, target_wp, 0};
+    waiting_for_[blocker].insert(rid);
+    PersistLogger::log_info(tag, rid, task_id,
+      "route " + join_waypoints(path) + " waits for active task " + conflict_task +
+      " on " + blocker + " resource=" + conflict_resource,
+      __FILE__, __LINE__, __func__);
+    fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(task_id);
+    if (!ti.task_id.empty()) task_pub_->publish(ti);
+  };
+
   // ── waiting_fleet 重调度: 退避期满的 deferred 任务恢复执行 ──
   for (const auto & t : scheduler_->get_all_tasks()) {
     if (t.status != "waiting_fleet") continue;
@@ -847,6 +898,18 @@ void FleetManagerNode::assign_pending_tasks()
       PersistLogger::log_info("sched.target_blocked_defer", rid, t.task_id,
         "target " + t.waypoint_id + " blocked by " + target_blocker,
         __FILE__, __LINE__, __func__);
+      continue;
+    }
+
+    auto route_path = plan_route_for_task(rid, t.waypoint_id);
+    std::string route_conflict_task;
+    std::string route_conflict_resource;
+    auto route_blocker = find_active_route_conflict(rid, t.task_id, route_path,
+      route_conflict_task, route_conflict_resource);
+    if (!route_blocker.empty()) {
+      register_route_wait(rid, t.task_id, t.waypoint_id, route_path,
+        route_blocker, route_conflict_task, route_conflict_resource,
+        "sched.route_active_defer");
       continue;
     }
 
@@ -925,9 +988,13 @@ void FleetManagerNode::assign_pending_tasks()
     if (!ti.task_id.empty()) task_pub_->publish(ti);
     t.task_id.clear();
   };
-
   std::map<std::string, std::string> claimed_targets;
   std::map<std::string, std::string> claimed_hubs;
+  std::map<std::string, std::pair<std::string, std::string>> claimed_route_wps;
+  std::map<std::string, std::pair<std::string, std::string>> claimed_route_edges;
+  auto directed_edge_key = [](const std::string & from, const std::string & to) {
+    return from + "->" + to;
+  };
   for (auto & t : assigned) {
     if (t.task_id.empty()) continue;
 
@@ -951,6 +1018,38 @@ void FleetManagerNode::assign_pending_tasks()
     if (path.empty() && !swp.empty()) path = {swp, t.waypoint_id};
     if (path.empty()) path = {t.waypoint_id};
 
+    std::string route_conflict_resource;
+    std::string route_conflict_task;
+    std::string route_conflict_robot;
+    for (size_t i = 0; i + 1 < path.size(); ++i) {
+      auto edge_claim = claimed_route_edges.find(directed_edge_key(path[i + 1], path[i]));
+      if (edge_claim != claimed_route_edges.end()) {
+        route_conflict_resource = directed_edge_key(path[i], path[i + 1]);
+        route_conflict_task = edge_claim->second.first;
+        route_conflict_robot = edge_claim->second.second;
+        break;
+      }
+    }
+    if (route_conflict_robot.empty()) {
+      const size_t first_claimed_wp = path.size() > 1 ? 1 : 0;
+      for (size_t i = first_claimed_wp; i < path.size(); ++i) {
+        auto wp_claim = claimed_route_wps.find(path[i]);
+        if (wp_claim != claimed_route_wps.end()) {
+          route_conflict_resource = path[i];
+          route_conflict_task = wp_claim->second.first;
+          route_conflict_robot = wp_claim->second.second;
+          break;
+        }
+      }
+    }
+    if (!route_conflict_robot.empty()) {
+      register_route_wait(t.assigned_robot_id, t.task_id, t.waypoint_id, path,
+        route_conflict_robot, route_conflict_task, route_conflict_resource,
+        "sched.route_batch_defer");
+      t.task_id.clear();
+      continue;
+    }
+
     std::string blocked_hub;
     std::string blocked_by;
     for (const auto & wp : path) {
@@ -970,6 +1069,14 @@ void FleetManagerNode::assign_pending_tasks()
     }
 
     claimed_targets[t.waypoint_id] = t.task_id;
+    const size_t first_claimed_wp = path.size() > 1 ? 1 : 0;
+    for (size_t i = first_claimed_wp; i < path.size(); ++i) {
+      claimed_route_wps[path[i]] = {t.task_id, t.assigned_robot_id};
+    }
+    for (size_t i = 0; i + 1 < path.size(); ++i) {
+      claimed_route_edges[directed_edge_key(path[i], path[i + 1])] =
+        {t.task_id, t.assigned_robot_id};
+    }
     for (const auto & wp : path) {
       if (traffic_->get_waypoint_connections(wp).size() >= 3)
         claimed_hubs[wp] = t.task_id;
@@ -1177,6 +1284,19 @@ void FleetManagerNode::assign_pending_tasks()
         t.task_id, target_blocker, std::string{}, std::string{}, t.waypoint_id, 0};
       fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(t.task_id);
       if (!ti.task_id.empty()) task_pub_->publish(ti);
+      t.task_id.clear();
+      continue;
+    }
+
+    auto route_path = plan_route_for_task(t.assigned_robot_id, t.waypoint_id);
+    std::string route_conflict_task;
+    std::string route_conflict_resource;
+    auto route_blocker = find_active_route_conflict(t.assigned_robot_id, t.task_id,
+      route_path, route_conflict_task, route_conflict_resource);
+    if (!route_blocker.empty()) {
+      register_route_wait(t.assigned_robot_id, t.task_id, t.waypoint_id,
+        route_path, route_blocker, route_conflict_task, route_conflict_resource,
+        "sched.route_active_defer");
       t.task_id.clear();
       continue;
     }
@@ -1414,11 +1534,23 @@ void FleetManagerNode::wake_waiters(const std::string & blocker_id)
     std::string actual_blocker;
     if (wait.state == TaskWaitState::WAIT_TARGET_CLEAR) {
       actual_blocker = occupancy_->waypoint_blocker(wait.robot_id, wait.target_wp);
+      if (actual_blocker.empty()) {
+        actual_blocker = physical_waypoint_blocker(wait.robot_id, wait.target_wp);
+      }
+      ready = actual_blocker.empty();
+    } else if (wait.state == TaskWaitState::WAIT_ROUTE_CLEAR) {
+      std::string conflict_task;
+      std::string conflict_resource;
+      actual_blocker = find_active_route_conflict(wait.robot_id, wait.task_id,
+        plan_route_for_task(wait.robot_id, wait.target_wp), conflict_task, conflict_resource);
       ready = actual_blocker.empty();
     } else if (wait.from_wp.empty() || wait.to_wp.empty()) {
       ready = true;
     } else {
       actual_blocker = occupancy_->can_enter(wait.robot_id, wait.from_wp, wait.to_wp);
+      if (actual_blocker.empty()) {
+        actual_blocker = physical_waypoint_blocker(wait.robot_id, wait.to_wp);
+      }
       ready = actual_blocker.empty() || actual_blocker != blocker_id;
     }
     if (ready) {
@@ -1464,6 +1596,9 @@ void FleetManagerNode::wake_waiters(const std::string & blocker_id)
     }
     if (!from.empty() && from != to) {
       auto blocker = occupancy_->can_enter(waiter_id, from, to);
+      if (blocker.empty()) {
+        blocker = physical_waypoint_blocker(waiter_id, to);
+      }
       if (!blocker.empty()) {
         auto blocker_ni = get_or_create_nav(blocker);
         bool blocker_idle = blocker_ni &&
@@ -1494,6 +1629,110 @@ void FleetManagerNode::wake_waiters(const std::string & blocker_id)
       __FILE__, __LINE__, __func__);
     navigate_to_next_waypoint(waiter_id);
   }
+}
+
+std::vector<std::string> FleetManagerNode::plan_route_for_task(
+  const std::string & robot_id,
+  const std::string & target_wp) const
+{
+  std::string start_wp;
+  auto st = robots_.find(robot_id);
+  if (st != robots_.end()) {
+    start_wp = st->second.current_waypoint;
+    if (start_wp.empty()) start_wp = traffic_->find_nearest_waypoint(st->second.current_pose);
+  }
+
+  std::vector<std::string> path;
+  if (!start_wp.empty() && start_wp != target_wp) {
+    path = traffic_->find_path(start_wp, target_wp);
+  }
+  if (path.empty() && !start_wp.empty() && start_wp != target_wp) {
+    path = {start_wp, target_wp};
+  }
+  if (path.empty()) path.push_back(target_wp);
+
+  std::vector<std::string> clean;
+  for (const auto & wp : path) {
+    if (clean.empty() || clean.back() != wp) clean.push_back(wp);
+  }
+  return clean;
+}
+
+std::string FleetManagerNode::physical_waypoint_blocker(
+  const std::string & robot_id,
+  const std::string & wp_id) const
+{
+  if (wp_id.empty()) return "";
+  const auto wp_pose = traffic_->get_waypoint_pose(wp_id);
+  const double radius = std::max(waypoint_radius_, traffic_->get_waypoint_radius(wp_id));
+  for (const auto & [rid, st] : robots_) {
+    if (rid == robot_id) continue;
+    if (st.connection_status != "online") continue;
+    if (std::abs(st.current_pose.position.x) < 1e-6 &&
+        std::abs(st.current_pose.position.y) < 1e-6) {
+      continue;
+    }
+    const double dx = st.current_pose.position.x - wp_pose.position.x;
+    const double dy = st.current_pose.position.y - wp_pose.position.y;
+    if (std::hypot(dx, dy) <= radius) return rid;
+  }
+  return "";
+}
+
+std::string FleetManagerNode::find_active_route_conflict(
+  const std::string & robot_id,
+  const std::string & task_id,
+  const std::vector<std::string> & path,
+  std::string & conflict_task_id,
+  std::string & conflict_resource) const
+{
+  conflict_task_id.clear();
+  conflict_resource.clear();
+  if (path.empty() || is_internal_task_id(task_id)) return {};
+
+  std::set<std::string> candidate_wps;
+  const size_t first_candidate_wp = path.size() > 1 ? 1 : 0;
+  for (size_t i = first_candidate_wp; i < path.size(); ++i) {
+    if (!path[i].empty()) candidate_wps.insert(path[i]);
+  }
+
+  std::set<std::pair<std::string, std::string>> candidate_edges;
+  for (size_t i = 0; i + 1 < path.size(); ++i) {
+    if (!path[i].empty() && !path[i + 1].empty() && path[i] != path[i + 1]) {
+      candidate_edges.insert({path[i], path[i + 1]});
+    }
+  }
+
+  for (const auto & [active_robot, ni] : navs_) {
+    if (active_robot == robot_id || !ni) continue;
+    if (ni->current_task_id.empty() || ni->current_task_id == task_id) continue;
+    if (is_internal_task_id(ni->current_task_id)) continue;
+    if (ni->route.empty() || ni->route_index >= ni->route.size()) continue;
+
+    const size_t active_begin = ni->route_index > 0 ? ni->route_index - 1 : ni->route_index;
+    for (const auto & [from, to] : candidate_edges) {
+      for (size_t i = active_begin; i + 1 < ni->route.size(); ++i) {
+        if (ni->route[i] == to && ni->route[i + 1] == from) {
+          conflict_task_id = ni->current_task_id;
+          conflict_resource = from + "->" + to;
+          return active_robot;
+        }
+      }
+    }
+
+    std::set<std::string> active_wps;
+    for (size_t i = active_begin; i < ni->route.size(); ++i) {
+      if (!ni->route[i].empty()) active_wps.insert(ni->route[i]);
+    }
+    for (const auto & wp : candidate_wps) {
+      if (active_wps.count(wp)) {
+        conflict_task_id = ni->current_task_id;
+        conflict_resource = wp;
+        return active_robot;
+      }
+    }
+  }
+  return {};
 }
 
 }  // namespace fleet_manager

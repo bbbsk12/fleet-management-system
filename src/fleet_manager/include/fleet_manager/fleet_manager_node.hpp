@@ -123,6 +123,7 @@ enum class TaskWaitState
   NONE,
   WAIT_BLOCKER_RELEASE,
   WAIT_TARGET_CLEAR,
+  WAIT_ROUTE_CLEAR,
   SELF_RELOCATING
 };
 
@@ -312,6 +313,18 @@ private:
 
   /// 事件驱动唤醒: 当 blocker 完成任务时，唤醒所有等待它的请求者
   void wake_waiters(const std::string & blocker_id);
+
+  std::vector<std::string> plan_route_for_task(const std::string & robot_id,
+      const std::string & target_wp) const;
+
+  std::string find_active_route_conflict(const std::string & robot_id,
+      const std::string & task_id,
+      const std::vector<std::string> & path,
+      std::string & conflict_task_id,
+      std::string & conflict_resource) const;
+
+  std::string physical_waypoint_blocker(const std::string & robot_id,
+      const std::string & wp_id) const;
 
   /// 图感知搜索: 找最近空闲且路径上无占用的航点 (统一函数)
   std::string find_safe_free_waypoint(const std::string & from_wp,
