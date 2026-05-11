@@ -2,6 +2,7 @@
 #include "fleet_manager/persist_logger.hpp"
 #include <chrono>
 #include <cmath>
+#include <set>
 #include <sstream>
 
 namespace fleet_manager
@@ -132,6 +133,11 @@ std::vector<fleet_msgs::msg::TaskInfo> TaskScheduler::assign_tasks_batch(
   std::vector<fleet_msgs::msg::TaskInfo> unmatched;
   size_t processed = 0;
 
+  // M3: 同 target 去重 — 同一批分配里同一 waypoint_id 只允许一个任务出去,
+  // 其余保持 pending(由 unmatched 重新入队),避免多个机器人同时去抢一个 target
+  // 触发的级联 target_active_defer 与 route 等待环。
+  std::set<std::string> targets_claimed_this_batch;
+
   for (size_t i = 0; i < pending.size(); ++i) {
     auto task = pending[i];
     processed = i + 1;
@@ -139,6 +145,12 @@ std::vector<fleet_msgs::msg::TaskInfo> TaskScheduler::assign_tasks_batch(
     // 跳过不存在于交通图的航点
     auto wp_it = waypoint_poses.find(task.waypoint_id);
     if (wp_it == waypoint_poses.end()) { unmatched.push_back(task); continue; }
+
+    // M3: 本批该 target 已被一个高优任务占用 → 这个任务回 pending,继续看下一个候选
+    if (targets_claimed_this_batch.count(task.waypoint_id)) {
+      unmatched.push_back(task);
+      continue;
+    }
 
     std::string best;
     double best_dist = std::numeric_limits<double>::max();
@@ -170,10 +182,11 @@ std::vector<fleet_msgs::msg::TaskInfo> TaskScheduler::assign_tasks_batch(
       auto & skip_count = fcfc_skip_count_[task.task_id];
       skip_count++;
       if (skip_count >= kFcfcGateMaxSkips) {
-        PersistLogger::log_warn("sched.fcfc_skip", "", task.task_id,
-          "FCFS gate blocked " + std::to_string(skip_count) + " ticks, skipping",
-          __FILE__, __LINE__, __func__);
-        skip_count = 0;
+        if (skip_count == kFcfcGateMaxSkips) {
+          PersistLogger::log_warn("sched.fcfc_skip", "", task.task_id,
+            "FCFS gate blocked " + std::to_string(skip_count) + " ticks, skipping",
+            __FILE__, __LINE__, __func__);
+        }
         continue;
       }
       break;
@@ -187,6 +200,7 @@ std::vector<fleet_msgs::msg::TaskInfo> TaskScheduler::assign_tasks_batch(
     all_[task.task_id] = task;
     results.push_back(task);
 
+    targets_claimed_this_batch.insert(task.waypoint_id);
     avail.erase(best);
     if (avail.empty()) break;
   }
@@ -245,19 +259,26 @@ void TaskScheduler::mark_task_pending(const std::string & task_id)
 
 void TaskScheduler::mark_task_pending_preserve(const std::string & task_id)
 {
+  mark_task_pending_retry(task_id, true);
+}
+
+void TaskScheduler::mark_task_pending_retry(const std::string & task_id, bool preserve_binding)
+{
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = all_.find(task_id);
   if (it == all_.end()) return;
 
+  const bool keep_binding = preserve_binding || fixed_.count(task_id);
+  const std::string previous_robot = it->second.assigned_robot_id;
   remove_from_queue(task_id);
   it->second.status = "pending";
-  // 保留 assigned_robot_id 绑定不清除
+  if (!keep_binding) it->second.assigned_robot_id.clear();
   retry_cycle_count_[task_id]++;
 
   queue_.push(it->second);
 
-  PersistLogger::log_info("sched.preserve", it->second.assigned_robot_id, task_id,
-    "re-queued preserving robot binding (cycle=" +
+  PersistLogger::log_info("sched.retry", previous_robot, task_id,
+    "re-queued after retryable failure (cycle=" +
     std::to_string(retry_cycle_count_[task_id]) + ")",
     __FILE__, __LINE__, __func__);
 }

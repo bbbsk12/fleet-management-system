@@ -72,6 +72,7 @@ public:
 
   /// 任务回 pending 但保留底盘绑定(用于超时/重试耗尽后的保留性回队)
   void mark_task_pending_preserve(const std::string & task_id);
+  void mark_task_pending_retry(const std::string & task_id, bool preserve_binding = false);
 
   /// 终结操作(带终端状态保护: 已完成/已失败/已取消的任务不会被覆盖)
   void complete_task(const std::string & task_id);

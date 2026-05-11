@@ -6,7 +6,7 @@ namespace fleet_manager
 
 namespace
 {
-std::string robot_resource_status(RobotResourceState state)
+[[maybe_unused]] std::string robot_resource_status(RobotResourceState state)
 {
   switch (state) {
     case RobotResourceState::CONFLICT: return "conflict";
@@ -95,6 +95,7 @@ void FleetManagerNode::handle_load_traffic_map(
   res->success = traffic_->load_map(req->file_path);
   res->message = res->success ? "loaded" : "failed";
   if (res->success) {
+    res->map = traffic_->get_map();
     // 重新注入拓扑到占用管理器
     occupancy_->set_topology(
       traffic_->get_adjacency_map(),
@@ -177,20 +178,20 @@ void FleetManagerNode::publish_traffic_fleet_status()
   out.active_tasks = last_fleet_.active_tasks;
   out.system_status = last_fleet_.system_status;
 
-  // 注入交通管制信息: nav_status / planned_route / current_task_id
-  for (auto & [id, st] : robots_) {
-    auto resource_status = robot_resource_status(occupancy_->get_robot_resource_state(id));
-    if (resource_status == "conflict" || resource_status == "ghost") st.nav_status = resource_status;
-    if (is_robot_executing(id)) st.nav_status = "executing";
-
-    auto ni = navs_.find(id);
-    if (ni != navs_.end() && ni->second) {
-      st.planned_route = ni->second->route;
-      if (!ni->second->current_task_id.empty())
-        st.current_task_id = ni->second->current_task_id;
+  auto snapshot = build_fleet_state_snapshot();
+  for (const auto & [id, st] : robots_) {
+    auto out_st = st;
+    auto snap_it = snapshot.robots.find(id);
+    if (snap_it != snapshot.robots.end()) {
+      const auto & robot = snap_it->second;
+      out_st.nav_status = robot_motion_state_name(robot.state);
+      out_st.planned_route = robot.route;
+      if (!robot.task_id.empty()) {
+        out_st.current_task_id = robot.task_id;
+      }
     }
 
-    out.robots.push_back(st);
+    out.robots.push_back(out_st);
   }
 
   traffic_pub_->publish(out);

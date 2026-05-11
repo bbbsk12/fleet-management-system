@@ -17,6 +17,7 @@ OccupancyManager::OccupancyManager(rclcpp::Node * node) : node_(node) {}
 void OccupancyManager::set_topology(
   const AdjacencyMap & adj, PoseQuery pq, RadiusQuery rq)
 {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   adjacency_    = adj;
   pose_query_   = std::move(pq);
   radius_query_ = std::move(rq);
@@ -55,6 +56,7 @@ DiscreteLocation OccupancyManager::update_location(
   double capture_radius,
   double segment_lateral_max)
 {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   DiscreteLocation loc;
 
   if (!pose_query_ || !radius_query_) {
@@ -87,7 +89,8 @@ DiscreteLocation OccupancyManager::update_location(
   if (loc.type == LocationType::UNKNOWN) {
     double best_seg_dist = std::numeric_limits<double>::max();
     std::string best_from, best_to;
-    for (const auto & [a, b] : all_edges_) {
+    const double lateral = std::max(segment_lateral_max, 0.8);
+    auto consider_edge = [&](const std::string & a, const std::string & b) {
       const auto pa = pose_query_(a);
       const auto pb = pose_query_(b);
       const double d = point_to_segment_distance(
@@ -95,8 +98,39 @@ DiscreteLocation OccupancyManager::update_location(
         pa.position.x, pa.position.y,
         pb.position.x, pb.position.y);
       if (d < best_seg_dist) { best_seg_dist = d; best_from = a; best_to = b; }
+    };
+    bool preferred_edge = false;
+    auto prev_loc = robot_locations_.find(robot_id);
+    if (prev_loc != robot_locations_.end() &&
+        prev_loc->second.type == LocationType::SEGMENT &&
+        !prev_loc->second.segment_from.empty() &&
+        !prev_loc->second.segment_to.empty()) {
+      consider_edge(prev_loc->second.segment_from, prev_loc->second.segment_to);
+      preferred_edge = best_seg_dist <= lateral;
     }
-    const double lateral = std::max(segment_lateral_max, 0.8);
+    if (!preferred_edge) {
+      best_seg_dist = std::numeric_limits<double>::max();
+      best_from.clear();
+      best_to.clear();
+      auto res_it = reservations_.find(robot_id);
+      if (res_it != reservations_.end() && res_it->second.size() == 2) {
+        auto it = res_it->second.begin();
+        const std::string a = *it++;
+        const std::string b = *it;
+        if (all_edges_.count({std::min(a, b), std::max(a, b)})) {
+          consider_edge(a, b);
+          preferred_edge = best_seg_dist <= lateral;
+        }
+      }
+    }
+    if (!preferred_edge) {
+      best_seg_dist = std::numeric_limits<double>::max();
+      best_from.clear();
+      best_to.clear();
+      for (const auto & [a, b] : all_edges_) {
+        consider_edge(a, b);
+      }
+    }
     if (!best_from.empty() && best_seg_dist <= lateral) {
       loc.type = LocationType::SEGMENT;
       loc.segment_from = best_from;
@@ -130,6 +164,7 @@ DiscreteLocation OccupancyManager::update_location(
 void OccupancyManager::force_set_location(
   const std::string & robot_id, const DiscreteLocation & loc)
 {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   clear_robot(robot_id);
   robot_locations_[robot_id] = loc;
   rebuild_resource_state();
@@ -137,6 +172,7 @@ void OccupancyManager::force_set_location(
 
 void OccupancyManager::clear_robot(const std::string & robot_id)
 {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   robot_locations_.erase(robot_id);
   reservations_.erase(robot_id);
   reservation_times_.erase(robot_id);
@@ -154,7 +190,9 @@ std::string OccupancyManager::can_enter(
   const std::string & from_wp,
   const std::string & to_wp) const
 {
-  if (to_wp.empty() || from_wp.empty() || to_wp == from_wp) return "invalid";
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (to_wp.empty() || from_wp.empty()) return "invalid";
+  if (to_wp == from_wp) return "";
   if (!conflict_hubs_.empty()) {
     for (const auto & [hub, holders] : conflict_hubs_) {
       if (hub == from_wp || hub == to_wp) return first_other_holder(holders, robot_id);
@@ -185,6 +223,7 @@ std::string OccupancyManager::waypoint_blocker(
   const std::string & robot_id,
   const std::string & wp_id) const
 {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (wp_id.empty()) return "";
   auto ch = conflict_hubs_.find(wp_id);
   if (ch != conflict_hubs_.end()) return first_other_holder(ch->second, robot_id);
@@ -206,6 +245,7 @@ bool OccupancyManager::reserve_next(
   const std::string & from_wp,
   const std::string & to_wp)
 {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   const std::string blocker = can_enter(robot_id, from_wp, to_wp);
   if (!blocker.empty()) {
     PersistLogger::log_warn(
@@ -225,6 +265,7 @@ bool OccupancyManager::reserve_next(
 
 void OccupancyManager::release_reservations(const std::string & robot_id)
 {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   reservations_.erase(robot_id);
   reservation_times_.erase(robot_id);
   rebuild_resource_state();
@@ -232,12 +273,14 @@ void OccupancyManager::release_reservations(const std::string & robot_id)
 
 void OccupancyManager::release_locks(const std::string & robot_id)
 {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   robot_locations_.erase(robot_id);
   rebuild_resource_state();
 }
 
 void OccupancyManager::expire_stale_reservations()
 {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   const auto now = node_->now();
   std::vector<std::string> expired;
   for (const auto & [rid, t] : reservation_times_) {
@@ -260,12 +303,14 @@ void OccupancyManager::expire_stale_reservations()
 
 DiscreteLocation OccupancyManager::get_location(const std::string & robot_id) const
 {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = robot_locations_.find(robot_id);
   return (it != robot_locations_.end()) ? it->second : DiscreteLocation{};
 }
 
 std::string OccupancyManager::get_zone_holder(const std::string & wp_id) const
 {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto ch = conflict_hubs_.find(wp_id);
   if (ch != conflict_hubs_.end()) return first_other_holder(ch->second, "");
   auto it = zone_locks_.find(wp_id);
@@ -275,6 +320,7 @@ std::string OccupancyManager::get_zone_holder(const std::string & wp_id) const
 bool OccupancyManager::is_zone_free_for(
   const std::string & robot_id, const std::string & wp_id) const
 {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (conflict_hubs_.count(wp_id)) return false;
   auto zl = zone_locks_.find(wp_id);
   if (zl != zone_locks_.end() && zl->second != robot_id) return false;
@@ -289,6 +335,7 @@ std::string OccupancyManager::find_nearest_free_waypoint(
   const std::string & from_wp,
   const std::vector<std::string> & exclude) const
 {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!pose_query_) return "";
 
   const auto from_pose = pose_query_(from_wp);
@@ -326,6 +373,7 @@ std::string OccupancyManager::find_nearest_free_waypoint(
 
 std::set<std::string> OccupancyManager::get_occupied_zones() const
 {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   std::set<std::string> s;
   for (const auto & [wp, _] : zone_locks_) s.insert(wp);
   for (const auto & [wp, _] : conflict_hubs_) s.insert(wp);
@@ -336,21 +384,25 @@ std::set<std::string> OccupancyManager::get_occupied_zones() const
 
 std::map<std::string, DiscreteLocation> OccupancyManager::get_all_locations() const
 {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   return robot_locations_;
 }
 
 std::map<std::string, std::set<std::string>> OccupancyManager::get_conflict_hubs() const
 {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   return conflict_hubs_;
 }
 
 std::map<std::string, std::set<std::string>> OccupancyManager::get_conflict_edges() const
 {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   return conflict_edges_;
 }
 
 RobotResourceState OccupancyManager::get_robot_resource_state(const std::string & robot_id) const
 {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = robot_states_.find(robot_id);
   return (it != robot_states_.end()) ? it->second : RobotResourceState::UNKNOWN;
 }
@@ -542,6 +594,7 @@ double OccupancyManager::point_to_segment_distance(
 
 void OccupancyManager::mark_ghost(const std::string & robot_id, rclcpp::Time now)
 {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   ghost_locks_[robot_id] = now;
   rebuild_resource_state();
   PersistLogger::log_info(
@@ -552,12 +605,14 @@ void OccupancyManager::mark_ghost(const std::string & robot_id, rclcpp::Time now
 
 void OccupancyManager::clear_ghost(const std::string & robot_id)
 {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   ghost_locks_.erase(robot_id);
   rebuild_resource_state();
 }
 
 bool OccupancyManager::is_holder_active(const std::string & robot_id, rclcpp::Time now, double ttl_sec) const
 {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = ghost_locks_.find(robot_id);
   if (it == ghost_locks_.end()) return true;  // 非幽灵 → 活跃
   double age = (now - it->second).seconds();
@@ -566,6 +621,7 @@ bool OccupancyManager::is_holder_active(const std::string & robot_id, rclcpp::Ti
 
 void OccupancyManager::expire_ghost_locks(rclcpp::Time now, double ttl_sec)
 {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   std::vector<std::string> expired;
   for (const auto & [rid, ghost_time] : ghost_locks_) {
     if ((now - ghost_time).seconds() >= ttl_sec) expired.push_back(rid);

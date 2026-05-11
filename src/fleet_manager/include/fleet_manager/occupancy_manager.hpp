@@ -8,6 +8,7 @@
 #include <set>
 #include <vector>
 #include <functional>
+#include <mutex>
 
 namespace fleet_manager
 {
@@ -155,6 +156,7 @@ private:
   bool is_holder_active(const std::string & robot_id, rclcpp::Time now, double ttl_sec) const;
 
   rclcpp::Node * node_;
+  mutable std::recursive_mutex mutex_;
 
   AdjacencyMap adjacency_;
   PoseQuery     pose_query_;

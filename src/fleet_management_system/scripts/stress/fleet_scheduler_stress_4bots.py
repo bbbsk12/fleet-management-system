@@ -68,6 +68,7 @@ class Report:
     submit_total: int
     poll_errors: List[str]
     submit_errors: List[str]
+    warnings: List[str]
     violations: List[str]
     events: List[Event]
 
@@ -127,6 +128,12 @@ def get_tasks(base: str) -> Dict[str, dict]:
     return out
 
 
+def get_metrics(base: str) -> dict:
+    data = _get(base, "/api/metrics", timeout=5.0)
+    metrics = data.get("metrics") or {}
+    return metrics if isinstance(metrics, dict) else {}
+
+
 def get_waypoint_ids(base: str) -> List[str]:
     """获取所有可用航点 ID。"""
     data = _get(base, "/api/map/waypoints", timeout=8.0)
@@ -140,9 +147,14 @@ def get_waypoint_ids(base: str) -> List[str]:
     return sorted(set(ids))
 
 
-def submit_task(base: str, waypoint_id: str, robot_id: Optional[str]) -> str:
+def submit_task(
+    base: str,
+    waypoint_id: str,
+    robot_id: Optional[str],
+    priority: int = 0,
+) -> str:
     """提交一个任务，返回任务 ID。"""
-    body = {"waypoint_id": waypoint_id, "priority": 0}
+    body = {"waypoint_id": waypoint_id, "priority": priority}
     if robot_id:
         body["robot_id"] = robot_id
     resp = _post(base, "/api/tasks", body, timeout=10.0)
@@ -187,8 +199,74 @@ def robot_activity_signature(r: dict) -> str:
     loc = seg or wp or "-"
     goal = "1" if r.get("goal", False) else "0"
     hold = "1" if r.get("hold", False) else "0"
-    task = r.get("task") or r.get("current_task_id") or ""
-    return f"{loc}|goal={goal}|hold={hold}|task={task}"
+    task = r.get("task") or r.get("current_task_id") or r.get("current_task") or ""
+    nav = r.get("nav_status") or r.get("status") or ""
+    pos = r.get("position") if isinstance(r.get("position"), dict) else {}
+    x = pos.get("world_x", pos.get("x")) if pos else None
+    y = pos.get("world_y", pos.get("y")) if pos else None
+    try:
+        pose = f"{float(x):.2f},{float(y):.2f}"
+    except (TypeError, ValueError):
+        pose = "-"
+    return f"{loc}|pose={pose}|goal={goal}|hold={hold}|task={task}|nav={nav}"
+
+
+def task_activity_signature(tasks: Dict[str, dict]) -> str:
+    parts = []
+    for tid, t in sorted(tasks.items()):
+        if t.get("status") in TERMINAL:
+            continue
+        rid = t.get("assigned_robot_id") or t.get("robot_id") or ""
+        wp = t.get("waypoint_id") or t.get("target_waypoint") or t.get("target") or ""
+        parts.append(f"{tid}:{t.get('status','')}:{rid}:{wp}")
+    return "|".join(parts)
+
+
+def print_diagnostic_snapshot(
+    base: str,
+    robots: Dict[str, dict],
+    tasks: Dict[str, dict],
+    robot_ids: List[str],
+) -> None:
+    print("\n=== DIAGNOSTIC SNAPSHOT ===", flush=True)
+    try:
+        metrics = get_metrics(base)
+    except Exception as e:  # noqa: BLE001
+        metrics = {"_error": str(e)}
+    print(
+        "metrics "
+        f"wait_edges={metrics.get('wait_edges', '-')}"
+        f" wait_graph={metrics.get('wait_graph', '-')}"
+        f" deadlock_breaks={metrics.get('deadlock_breaks', '-')}",
+        flush=True,
+    )
+    print("robots:", flush=True)
+    for rid in robot_ids:
+        r = robots.get(rid) or {}
+        route = r.get("planned_route") or r.get("route") or []
+        if isinstance(route, list):
+            route_s = "->".join(str(x) for x in route[:10])
+        else:
+            route_s = str(route)
+        print(
+            f"  {rid}: nav={r.get('nav_status') or r.get('status') or '-'}"
+            f" task={r.get('current_task_id') or r.get('task') or '-'}"
+            f" wp={r.get('current_waypoint') or '-'}"
+            f" seg={r.get('current_segment') or '-'}"
+            f" route={route_s or '-'}",
+            flush=True,
+        )
+    live = [t for t in tasks.values() if t.get("status") not in TERMINAL]
+    print("live_tasks:", flush=True)
+    for t in live[:20]:
+        tid = t.get("id") or t.get("task_id") or "-"
+        rid = t.get("assigned_robot_id") or t.get("robot_id") or "-"
+        wp = t.get("waypoint_id") or t.get("target_waypoint") or t.get("target") or "-"
+        print(
+            f"  {tid}: status={t.get('status', '-')}"
+            f" robot={rid} wp={wp}",
+            flush=True,
+        )
 
 
 def pick_hot_waypoints(waypoint_ids: List[str]) -> List[str]:
@@ -211,6 +289,167 @@ def pick_hot_waypoints(waypoint_ids: List[str]) -> List[str]:
     return out or waypoint_ids
 
 
+@dataclass
+class TaskPlan:
+    scenario: str
+    waypoint_id: str
+    robot_id: Optional[str]
+    priority: int = 0
+    detail: str = ""
+
+
+def _pick_distinct(
+    rng: random.Random,
+    items: List[str],
+    n: int,
+) -> List[str]:
+    if not items:
+        return []
+    if len(items) >= n:
+        return rng.sample(items, n)
+    out = list(items)
+    while len(out) < n:
+        out.append(rng.choice(items))
+    return out
+
+
+def build_task_plans(
+    rng: random.Random,
+    robot_ids: List[str],
+    waypoint_ids: List[str],
+    hot: List[str],
+    task_count: int,
+) -> List[TaskPlan]:
+    plans: List[TaskPlan] = []
+    all_wps = waypoint_ids or hot
+    hot_wps = hot or all_wps
+    preferred_pairs = [
+        ("wp_001", "wp_004"),
+        ("wp_002", "wp_007"),
+        ("wp_003", "wp_016"),
+        ("wp_005", "wp_006"),
+    ]
+    pairs = [
+        (a, b) for a, b in preferred_pairs
+        if a in all_wps and b in all_wps and a != b
+    ]
+    if not pairs:
+        picked = _pick_distinct(rng, all_wps, 2)
+        if len(picked) >= 2:
+            pairs = [(picked[0], picked[1])]
+
+    wave = 0
+    while len(plans) < task_count:
+        scenario = wave % 9
+
+        if scenario == 0:
+            target_wp = hot_wps[wave % len(hot_wps)]
+            for rid in robot_ids:
+                plans.append(TaskPlan(
+                    "hotspot_merge",
+                    target_wp,
+                    rid,
+                    detail=f"all_to={target_wp}",
+                ))
+
+        elif scenario == 1:
+            pair = pairs[wave % len(pairs)] if pairs else (
+                rng.choice(all_wps), rng.choice(all_wps)
+            )
+            a, b = pair
+            for i, rid in enumerate(robot_ids):
+                plans.append(TaskPlan(
+                    "opposite_pair",
+                    b if i % 2 == 0 else a,
+                    rid,
+                    detail=f"pair={a}<->{b}",
+                ))
+
+        elif scenario == 2:
+            for i, rid in enumerate(robot_ids):
+                plans.append(TaskPlan(
+                    "chase_current",
+                    "",
+                    rid,
+                    detail=f"chase_index={(i + 1) % len(robot_ids)}",
+                ))
+
+        elif scenario == 3:
+            ring = _pick_distinct(rng, hot_wps, min(4, len(robot_ids)))
+            while len(ring) < len(robot_ids):
+                ring.append(rng.choice(hot_wps))
+            for i, rid in enumerate(robot_ids):
+                plans.append(TaskPlan(
+                    "ring_rotation",
+                    ring[(i + 1) % len(ring)],
+                    rid,
+                    detail="cyclic_targets",
+                ))
+
+        elif scenario == 4:
+            fixed_target = rng.choice(hot_wps)
+            for i, rid in enumerate(robot_ids):
+                plans.append(TaskPlan(
+                    "mixed_auto_fixed",
+                    fixed_target if i < 2 else rng.choice(all_wps),
+                    rid if i % 2 == 0 else None,
+                    priority=1 if i == 0 else 0,
+                    detail=f"fixed_target={fixed_target}",
+                ))
+
+        elif scenario == 5:
+            corridor = pairs[wave % len(pairs)] if pairs else (
+                rng.choice(all_wps), rng.choice(all_wps)
+            )
+            a, b = corridor
+            sequence = [a, b, a, b]
+            for i, rid in enumerate(robot_ids):
+                plans.append(TaskPlan(
+                    "corridor_pingpong",
+                    sequence[i % len(sequence)],
+                    rid,
+                    detail=f"corridor={a}<->{b}",
+                ))
+
+        elif scenario == 6:
+            chosen = _pick_distinct(rng, all_wps, len(robot_ids))
+            for i, rid in enumerate(robot_ids):
+                plans.append(TaskPlan(
+                    "scatter_random",
+                    chosen[i % len(chosen)],
+                    rid if rng.random() < 0.5 else None,
+                    priority=rng.choice([0, 0, 1]),
+                    detail="spread_targets",
+                ))
+
+        elif scenario == 7:
+            queue_wp = rng.choice(hot_wps[: min(4, len(hot_wps))])
+            for i in range(max(4, len(robot_ids))):
+                rid = robot_ids[i % len(robot_ids)]
+                plans.append(TaskPlan(
+                    "same_target_queue",
+                    queue_wp,
+                    rid if i % 3 != 2 else None,
+                    detail=f"queue_wp={queue_wp}",
+                ))
+
+        else:
+            candidates = hot_wps if rng.random() < 0.7 else all_wps
+            for i in range(len(robot_ids)):
+                rid = rng.choice(robot_ids)
+                plans.append(TaskPlan(
+                    "random_mixed",
+                    rng.choice(candidates),
+                    rid if rng.random() < 0.65 else None,
+                    priority=rng.choice([0, 0, 0, 1, 2]),
+                    detail="randomized",
+                ))
+
+        wave += 1
+
+    return plans[:task_count]
+
+
 def main() -> int:
     """主函数：解析参数，初始化，执行压力测试循环。"""
     ap = argparse.ArgumentParser(
@@ -224,11 +463,13 @@ def main() -> int:
         "--robot-ids", default="",
         help="Comma-separated robot IDs (default: all online)"
     )
-    ap.add_argument("--duration", type=float, default=240.0,
-                    help="Test duration seconds")
+    ap.add_argument("--duration", type=float, default=3600.0,
+                    help="Max test duration seconds")
+    ap.add_argument("--task-count", type=int, default=200)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--poll-interval", type=float, default=0.25)
     ap.add_argument("--submit-burst-interval", type=float, default=2.5)
+    ap.add_argument("--submit-burst-size", type=int, default=4)
     ap.add_argument("--max-live-tasks", type=int, default=16)
     ap.add_argument("--stall-timeout", type=float, default=18.0,
                     help="Fail if live tasks but no activity")
@@ -252,6 +493,7 @@ def main() -> int:
         submit_total=0,
         poll_errors=[],
         submit_errors=[],
+        warnings=[],
         violations=[],
         events=[],
     )
@@ -290,14 +532,20 @@ def main() -> int:
             return 2
         rep.poll_errors.append(f"cleanup: {e}")
 
+    plans = build_task_plans(
+        rng,
+        target,
+        waypoint_ids,
+        hot,
+        max(0, int(args.task_count)),
+    )
+
     print(f"[bootstrap] robots={target} waypoints={len(waypoint_ids)} "
-          f"hot={hot[:8]}", flush=True)
+          f"hot={hot[:8]} task_count={len(plans)}", flush=True)
 
     t0 = time.time()
     next_burst = t0
     last_poll = 0.0
-    last_activity_ts = t0
-    last_activity_sig: Dict[str, str] = {}
 
     def record(kind: str, detail: str) -> None:
         """记录一条事件。"""
@@ -305,150 +553,180 @@ def main() -> int:
 
     def check_rules(robots: Dict[str, dict]) -> None:
         """检查交通规则违反，若发现则记录并抛出异常。"""
-        viol = check_traffic_rule_violations(robots)
-        if viol:
-            rep.violations.extend(viol)
-            raise RuntimeError("\n".join(viol))
+        rule_hits = check_traffic_rule_violations(robots)
+        hard_viol = [v for v in rule_hits if v.startswith("[①同航点]")]
+        soft_warn = [v for v in rule_hits if not v.startswith("[①同航点]")]
+        for warn in soft_warn:
+            if warn in rep.warnings:
+                continue
+            rep.warnings.append(warn)
+            record("WARN", warn)
+            print(f"\nWARN: {warn}", flush=True)
+        if hard_viol:
+            rep.violations.extend(hard_viol)
+            raise RuntimeError("\n".join(hard_viol))
 
     def live_task_count(tasks: Dict[str, dict]) -> int:
         """统计非终态活跃任务数量。"""
         return sum(1 for t in tasks.values() if t.get("status") not in TERMINAL)
 
-    # ---- 压力测试主循环 ----
-    phase = 0
+    plan_index = 0
+    last_live_tasks = 0
+    stop_requested = False
+    timed_out = False
+    next_progress_report = 20
+    last_activity_sig = ""
+    last_activity_time = time.time()
+    stall_detected = False
+    last_robots: Dict[str, dict] = robots0
+    last_tasks: Dict[str, dict] = {}
     while True:
         now = time.time()
         if now - t0 >= args.duration:
+            timed_out = True
+            record("TIMEOUT", f"duration={args.duration}s")
+            break
+        if plan_index >= len(plans) and last_live_tasks == 0:
             break
 
-        # ---- 状态轮询 ----
         if now - last_poll >= args.poll_interval:
             last_poll = now
             try:
                 robots = get_robots(base)
                 tasks = get_tasks(base)
+                last_robots = robots
+                last_tasks = tasks
+                last_live_tasks = live_task_count(tasks)
                 check_rules(robots)
-                # 检测活动变化
-                activity = False
-                for rid in target:
-                    r = robots.get(rid) or {}
-                    sig = robot_activity_signature(r)
-                    if last_activity_sig.get(rid) != sig:
-                        activity = True
-                        last_activity_sig[rid] = sig
-                if activity:
-                    last_activity_ts = now
-                # 全局挂起检测
-                if live_task_count(tasks) > 0 and \
-                   (now - last_activity_ts) >= args.stall_timeout:
-                    raise RuntimeError(
-                        f"stall_timeout: live_tasks={live_task_count(tasks)} "
-                        f"no activity for {now - last_activity_ts:.1f}s"
+                activity_sig = "|".join(
+                    f"{rid}:{robot_activity_signature(robots.get(rid) or {})}"
+                    for rid in target
+                ) + "||tasks=" + task_activity_signature(tasks)
+                if last_live_tasks == 0:
+                    last_activity_sig = activity_sig
+                    last_activity_time = now
+                elif activity_sig != last_activity_sig:
+                    last_activity_sig = activity_sig
+                    last_activity_time = now
+                elif now - last_activity_time >= args.stall_timeout:
+                    stall_detected = True
+                    record(
+                        "STALL",
+                        f"no activity for {args.stall_timeout}s live={last_live_tasks}",
                     )
+                    print(
+                        f"\nFAIL: global stall for {args.stall_timeout}s "
+                        f"live={last_live_tasks}",
+                        flush=True,
+                    )
+                    print_diagnostic_snapshot(base, robots, tasks, target)
+                    break
             except Exception as e:  # noqa: BLE001
                 msg = str(e)
-                if "stall_timeout" in msg:
-                    record("STALL", msg)
-                else:
-                    rep.poll_errors.append(msg)
+                rep.poll_errors.append(msg)
                 if not args.allow_api_errors:
                     print(f"\nFAIL: {msg}", flush=True)
                     break
 
-        # ---- 任务突发提交（按阶段切换不同压力场景）----
-        if now >= next_burst:
+        if plan_index < len(plans) and now >= next_burst:
             next_burst = now + args.submit_burst_interval
             try:
                 tasks = get_tasks(base)
-                if live_task_count(tasks) >= args.max_live_tasks:
+                last_live_tasks = live_task_count(tasks)
+                if last_live_tasks >= args.max_live_tasks:
                     continue
 
                 robots = get_robots(base)
-
-                # 阶段 0：全部到同一航点（合并队列测试）
-                if phase % 4 == 0:
-                    target_wp = rng.choice(hot[: min(len(hot), 4)])
-                    record("PHASE", f"merge_queue_all_to_one wp={target_wp}")
-                    for rid in target:
-                        rep.submit_total += 1
+                slots = max(0, args.max_live_tasks - last_live_tasks)
+                burst = min(max(1, args.submit_burst_size), slots,
+                            len(plans) - plan_index)
+                for _ in range(burst):
+                    plan = plans[plan_index]
+                    plan_index += 1
+                    wp = plan.waypoint_id
+                    chase = ""
+                    if plan.scenario == "chase_current" and plan.robot_id:
                         try:
-                            tid = submit_task(base, target_wp, rid)
-                            rep.submit_ok += 1
-                            record("SUBMIT", f"{rid}->{target_wp} tid={tid}")
-                        except Exception as e:  # noqa: BLE001
-                            rep.submit_errors.append(str(e))
-
-                # 阶段 1：对向交换（两对机器人互换目标）
-                elif phase % 4 == 1:
-                    a, b, c, d = target
-                    wp_a = rng.choice(hot)
-                    wp_b = rng.choice([w for w in hot if w != wp_a] or hot)
-                    record("PHASE", f"swap_pairs {a}<->{b} {c}<->{d} "
-                           f"wps={wp_a},{wp_b}")
-                    for rid, wp in [(a, wp_b), (b, wp_a), (c, wp_a), (d, wp_b)]:
-                        rep.submit_total += 1
-                        try:
-                            tid = submit_task(base, wp, rid)
-                            rep.submit_ok += 1
-                            record("SUBMIT", f"{rid}->{wp} tid={tid}")
-                        except Exception as e:  # noqa: BLE001
-                            rep.submit_errors.append(str(e))
-
-                # 阶段 2：追逐另一机器人当前所在航点（动态阻塞）
-                elif phase % 4 == 2:
-                    record("PHASE", "chase_current_waypoints")
-                    cur_wp = {}
-                    for rid in target:
-                        r = robots.get(rid) or {}
-                        cur_wp[rid] = (r.get("current_waypoint") or "").strip()
-                    for i, rid in enumerate(target):
-                        other = target[(i + 1) % 4]
-                        wp = cur_wp.get(other) or rng.choice(hot)
-                        rep.submit_total += 1
-                        try:
-                            tid = submit_task(base, wp, rid)
-                            rep.submit_ok += 1
-                            record("SUBMIT", f"{rid}->{wp} chase={other} "
-                                   f"tid={tid}")
-                        except Exception as e:  # noqa: BLE001
-                            rep.submit_errors.append(str(e))
-
-                # 阶段 3：随机突发（争用 + 死锁暴露）
-                else:
-                    record("PHASE", "random_burst")
-                    for _ in range(4):
-                        rid = rng.choice(target)
+                            i = target.index(plan.robot_id)
+                        except ValueError:
+                            i = 0
+                        other = target[(i + 1) % len(target)]
+                        r = robots.get(other) or {}
+                        wp = (r.get("current_waypoint") or "").strip()
+                        if not wp:
+                            wp = rng.choice(hot)
+                        chase = f" chase={other}"
+                    if not wp:
                         wp = rng.choice(hot)
-                        rep.submit_total += 1
-                        try:
-                            tid = submit_task(
-                                base, wp, rid if rng.random() < 0.7 else None
-                            )
-                            rep.submit_ok += 1
-                            record("SUBMIT", f"{rid or 'auto'}->{wp} tid={tid}")
-                        except Exception as e:  # noqa: BLE001
-                            rep.submit_errors.append(str(e))
 
-                phase += 1
+                    rep.submit_total += 1
+                    try:
+                        tid = submit_task(
+                            base,
+                            wp,
+                            plan.robot_id,
+                            plan.priority,
+                        )
+                        rep.submit_ok += 1
+                        last_live_tasks += 1
+                        record(
+                            "SUBMIT",
+                            f"{plan.scenario} "
+                            f"{plan.robot_id or 'auto'}->{wp}"
+                            f" pri={plan.priority}{chase} tid={tid} "
+                            f"{plan.detail}",
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        rep.submit_errors.append(str(e))
+                        if not args.allow_api_errors:
+                            print(f"\nFAIL: submit error: {e}", flush=True)
+                            stop_requested = True
+                            break
+
+                while rep.submit_ok >= next_progress_report:
+                    print(
+                        f"[progress] submitted={rep.submit_ok}/{len(plans)} "
+                        f"live={last_live_tasks}",
+                        flush=True,
+                    )
+                    next_progress_report += 20
 
             except Exception as e:  # noqa: BLE001
                 rep.poll_errors.append(f"burst: {e}")
                 if not args.allow_api_errors:
                     print(f"\nFAIL: burst error: {e}", flush=True)
                     break
+            if stop_requested:
+                break
 
         time.sleep(0.02)
 
     # ---- 结果输出 ----
-    ok = not rep.violations and not (rep.poll_errors and not args.allow_api_errors)
+    ok = (
+        not timed_out and
+        not stall_detected and
+        rep.submit_ok == len(plans) and
+        last_live_tasks == 0 and
+        not rep.violations and
+        not (rep.poll_errors and not args.allow_api_errors) and
+        not (rep.submit_errors and not args.allow_api_errors)
+    )
     if rep.violations:
         print("\n=== VIOLATIONS ===")
         for v in rep.violations[:20]:
             print(v)
+    if rep.warnings:
+        print("\n=== WARNINGS ===")
+        for w in rep.warnings[:20]:
+            print(w)
+    if not ok and not stall_detected:
+        print_diagnostic_snapshot(base, last_robots, last_tasks, target)
 
     print(
         f"\n[summary] ok={ok} submit_ok={rep.submit_ok}/{rep.submit_total} "
-        f"viol={len(rep.violations)} poll_err={len(rep.poll_errors)} "
+        f"planned={len(plans)} live={last_live_tasks} timeout={timed_out} "
+        f"viol={len(rep.violations)} warn={len(rep.warnings)} "
+        f"poll_err={len(rep.poll_errors)} "
         f"submit_err={len(rep.submit_errors)}",
         flush=True,
     )

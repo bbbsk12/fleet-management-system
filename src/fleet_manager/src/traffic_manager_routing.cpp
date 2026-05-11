@@ -72,7 +72,7 @@ std::vector<std::string> TrafficManager::find_path(
   }
   std::reverse(path.begin(), path.end());
 
-  RCLCPP_INFO(node_->get_logger(), "Path found: %s",
+  RCLCPP_DEBUG(node_->get_logger(), "Path found: %s",
               [&path]() {
                 std::string result;
                 for (size_t i = 0; i < path.size(); ++i) {
@@ -198,6 +198,56 @@ std::vector<std::string> TrafficManager::find_path_weighted(
   return path;
 }
 
+std::vector<std::string> TrafficManager::find_path_avoiding(
+  const std::string & from_waypoint,
+  const std::string & to_waypoint,
+  const std::set<std::string> & avoid_waypoints)
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  // 边界:起点本身在 avoid_waypoints 中 → 仍允许从起点开始
+  // 终点本身在 avoid_waypoints 中 → 允许进入终点
+  // 中间航点在 avoid_waypoints 中 → 跳过
+  std::map<std::string, std::vector<std::string>> adjacency;
+  for (const auto & wp : current_map_.waypoints) {
+    for (const auto & conn : wp.connections) {
+      adjacency[wp.waypoint_id].push_back(conn);
+    }
+  }
+
+  std::map<std::string, std::string> parent;
+  std::set<std::string> visited;
+  std::queue<std::string> q;
+  q.push(from_waypoint);
+  visited.insert(from_waypoint);
+  parent[from_waypoint] = "";
+  bool found = (from_waypoint == to_waypoint);
+
+  while (!q.empty() && !found) {
+    auto cur = q.front();
+    q.pop();
+    for (const auto & nb : adjacency[cur]) {
+      if (visited.count(nb)) continue;
+      // 硬避让:除终点外,avoid 的航点完全跳过
+      if (nb != to_waypoint && avoid_waypoints.count(nb)) continue;
+      visited.insert(nb);
+      parent[nb] = cur;
+      if (nb == to_waypoint) { found = true; break; }
+      q.push(nb);
+    }
+  }
+
+  std::vector<std::string> path;
+  if (!found) return path;
+  std::string cur = to_waypoint;
+  while (!cur.empty()) {
+    path.push_back(cur);
+    cur = parent[cur];
+  }
+  std::reverse(path.begin(), path.end());
+  return path;
+}
+
 std::vector<geometry_msgs::msg::Pose> TrafficManager::plan_route(
   const std::string & from_waypoint,
   const std::string & to_waypoint)
@@ -239,6 +289,12 @@ geometry_msgs::msg::Pose TrafficManager::get_waypoint_pose(
 {
   std::lock_guard<std::mutex> lock(mutex_);
   return get_waypoint_pose_unlocked(waypoint_id);
+}
+
+fleet_msgs::msg::TrafficMap TrafficManager::get_map() const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  return current_map_;
 }
 
 std::map<std::string, geometry_msgs::msg::Pose> TrafficManager::get_all_waypoint_poses() const

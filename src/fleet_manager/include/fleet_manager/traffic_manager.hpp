@@ -53,6 +53,13 @@ public:
     const std::set<std::string> & occupied_edges,
     const std::set<std::string> & occupied_waypoints);
 
+  /// 硬避让寻路: avoid_waypoints 中的航点视为图中不存在,完全绕开
+  /// (与 find_path_weighted 的软成本不同,这里是强约束;若没绕路返回空)
+  std::vector<std::string> find_path_avoiding(
+    const std::string & from_waypoint,
+    const std::string & to_waypoint,
+    const std::set<std::string> & avoid_waypoints);
+
   /// 两点间线性插值路径(用于可视化)
   std::vector<geometry_msgs::msg::Pose> plan_route(
     const std::string & from_waypoint,
@@ -60,7 +67,7 @@ public:
 
   // ── 航点查询 ──────────────────────────────────────────────
 
-  fleet_msgs::msg::TrafficMap get_map() const { return current_map_; }
+  fleet_msgs::msg::TrafficMap get_map() const;
 
   geometry_msgs::msg::Pose get_waypoint_pose(const std::string & waypoint_id) const;
   std::map<std::string, geometry_msgs::msg::Pose> get_all_waypoint_poses() const;

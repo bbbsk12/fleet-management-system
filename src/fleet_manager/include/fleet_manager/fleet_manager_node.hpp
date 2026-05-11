@@ -72,6 +72,10 @@ struct RobotNavInfo
   int retry_count{0};                   // 当前跳的重试次数
   rclcpp::Time retry_after;            // 下次重试的允许时间(退避窗口)
 
+  // ── #3 hop reroute 计数 ──
+  std::string hop_block_key;           // "from->to:blocker" 形式的当前阻塞唯一 key
+  int hop_block_count{0};              // 同一 key 累计被 hop_blocked 的次数
+
   // ── 底盘任务(LOAD/UNLOAD/SITE_SPECIFIC) ──
   rclcpp::Publisher<fleet_msgs::msg::TaskCmd>::SharedPtr  task_cmd_pub;
   rclcpp::Subscription<fleet_msgs::msg::TaskFb>::SharedPtr task_fb_sub;
@@ -120,6 +124,7 @@ struct ChainRetreatPlan
   size_t current_step{0};               // 当前执行到的步骤索引
   bool active{false};                   // 链是否正在执行
   rclcpp::Time started_at;             // 链启动时间(超时检测)
+  rclcpp::Time step_started_at;
   int step_retry_count{0};             // 当前步骤的重试次数
 };
 
@@ -142,6 +147,63 @@ struct TaskWaitCondition
   std::string to_wp;
   std::string target_wp;
   int retreat_count{0};
+};
+
+enum class RobotMotionState
+{
+  UNKNOWN,
+  OFFLINE,
+  IDLE,
+  ASSIGNED,
+  ALIGNING,
+  MOVING,
+  WAITING_BLOCKER,
+  WAITING_TARGET,
+  WAITING_ROUTE,
+  SELF_RELOCATING,
+  YIELDING,
+  RELOCATING,
+  CHAIN_STEP,
+  EXECUTING,
+  CONFLICT,
+  GHOST
+};
+
+struct WaitEdge
+{
+  std::string waiter_robot_id;
+  std::string blocker_robot_id;
+  std::string task_id;
+  TaskWaitState wait_state{TaskWaitState::NONE};
+  std::string from_wp;
+  std::string to_wp;
+  std::string target_wp;
+  std::string resource;
+  bool active_navigation{false};
+};
+
+struct RobotStateSnapshot
+{
+  std::string robot_id;
+  RobotMotionState state{RobotMotionState::UNKNOWN};
+  std::string task_id;
+  std::string current_wp;
+  std::string next_wp;
+  std::string target_wp;
+  std::string blocker_id;
+  std::string wait_resource;
+  std::vector<std::string> route;
+  size_t route_index{0};
+  bool online{false};
+  bool has_active_goal{false};
+  bool chassis_task_sent{false};
+};
+
+struct FleetStateSnapshot
+{
+  std::map<std::string, RobotStateSnapshot> robots;
+  std::vector<WaitEdge> wait_edges;
+  std::map<std::string, std::string> wait_graph;
 };
 
 // ============================================================================
@@ -215,6 +277,11 @@ private:
 
   /// 构建阻塞图并检测死锁环，打破时物理移走 victim
   void deadlock_check();
+  FleetStateSnapshot build_fleet_state_snapshot() const;
+  std::string resolve_wait_blocker(const TaskWaitCondition & wait,
+      std::string & resource) const;
+  void clear_task_wait_condition(const std::string & task_id);
+  std::string robot_motion_state_name(RobotMotionState state) const;
 
   // ========================================================================
   // 导航控制
@@ -267,6 +334,16 @@ private:
   bool try_build_retreat_chain(const std::string & requester, const std::string & from_wp,
                                const std::string & to_wp, const std::string & blocker,
                                const std::set<std::string> & blocked_set, int depth);
+
+  /// 启动 target 退让 chain retreat: 推 target_holder 出 target_wp 为 requester 让位。
+  /// 内部调用 try_push_occupant 构造 chain_plan_ 并 execute_chain_step。
+  /// 调用方应先确认 chain_plan_.active==false。成功返回 true 并标记 chain 启动。
+  bool try_start_target_exit_chain(
+      const std::string & target_holder,
+      const std::string & target_wp,
+      const std::string & requester_rid,
+      const std::string & requester_task_id,
+      const std::set<std::string> & exclude);
 
   /// 执行链中的当前步骤(发送 NavigateToPose)
   void execute_chain_step();
@@ -327,7 +404,8 @@ private:
       const std::string & task_id,
       const std::vector<std::string> & path,
       std::string & conflict_task_id,
-      std::string & conflict_resource) const;
+      std::string & conflict_resource,
+      bool include_waiting_intents = false) const;
 
   std::string physical_waypoint_blocker(const std::string & robot_id,
       const std::string & wp_id) const;
@@ -405,6 +483,26 @@ private:
   uint64_t deadlock_break_count_{0};            // 累计死锁打破次数(metrics 用)
   rclcpp::Time last_metrics_time_;               // 上次发布 metrics 的时间
 
+  /// 按 key 限速重复日志(防止稳态等待场景每秒刷屏);
+  /// 返回 true 表示这次允许写日志,false 表示静默
+  std::map<std::string, rclcpp::Time> log_throttle_;
+  bool log_throttle_ok(const std::string & key, double min_interval_sec);
+
+  /// (#2 自愈) 同一 (rid:tid) 累计 priority_hold 次数,达阈值时强制 yield
+  std::map<std::string, int> priority_hold_count_;
+
+  /// (#4 自愈) 同一 task_id 累计被 target_active_defer 的次数,
+  /// 达阈值时 fail task 释放 robot binding,避免 cross-batch 同 target 死锁。
+  std::map<std::string, int> target_active_defer_count_;
+
+  /// (#2 自愈) 强制让 hold 中的 blocker 派一个 avoidance 任务退到安全 yield wp。
+  /// rid 是当前 hold 自身任务的机器人, current_task_id 是被 hold 的任务,
+  /// current_target_wp 是该任务的目标(应被加入 exclude)。
+  /// 找到 yield 落点 → 派 avoidance 并返回 true; 失败返回 false 继续 hold。
+  bool force_blocker_yield(const std::string & rid,
+                           const std::string & current_target_wp,
+                           const std::string & current_task_id);
+
   // ========================================================================
   // 可配置参数 (通过 ROS2 parameter 或 launch 文件设置)
   // ========================================================================
@@ -421,8 +519,8 @@ private:
   int    chassis_max_retries_{3};        // 底盘握手最大重试次数
   double monitor_stale_timeout_{4.0};    // fleet_monitor 数据陈旧超时(s)
   double ghost_lock_ttl_{120.0};         // 幽灵锁 TTL(s)
-  double deadlock_timeout_{10.0};         // 死锁持续多久后打破(s)
-  int    max_task_retry_cycles_{5};      // 任务最大重试轮数
+  double deadlock_timeout_{5.0};         // 死锁持续多久后打破(s)
+  int    max_task_retry_cycles_{8};      // 任务最大重试轮数
 };
 
 }  // namespace fleet_manager
