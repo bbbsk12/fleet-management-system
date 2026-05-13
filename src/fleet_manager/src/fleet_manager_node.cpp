@@ -408,12 +408,16 @@ void FleetManagerNode::assign_pending_tasks()
   std::lock_guard<std::recursive_mutex> lock(mtx_);
 
   const auto now = this->now();
-  if (!occupancy_->get_conflict_hubs().empty() ||
-      !occupancy_->get_conflict_edges().empty()) {
-    PersistLogger::log_warn("sched.resource_conflict_pause", "", "",
-      "resource conflict active, pausing new assignments",
-      __FILE__, __LINE__, __func__);
-    return;
+  // 物理冲突(多机同 hub / 同边)时仍必须跑 progress_wait_conditions 与
+  // waiting_fleet 重派，否则无法触发占点退出/链撤退，整队会卡死并触发
+  // stress 脚本的 stall。仅暂停「新 pending→批分配→start_navigation」。
+  const bool occ_resource_conflict =
+    !occupancy_->get_conflict_hubs().empty() ||
+    !occupancy_->get_conflict_edges().empty();
+  if (occ_resource_conflict) {
+    RCLCPP_WARN_THROTTLE(
+      this->get_logger(), *this->get_clock(), 2000,
+      "occupancy resource conflict: recovery paths run, new batch assigns held");
   }
   // 链 retreat 只阻塞链的参与者(steps + saved_task_ids),其它机器人
   // 继续正常调度,避免整队被一条 chain 卡死。
@@ -1087,6 +1091,7 @@ void FleetManagerNode::assign_pending_tasks()
     mark_snapshot_dirty();
   }
 
+  auto run_new_task_batch = [&]() {
   // ── 构建可用底盘列表 ──
   std::vector<fleet_msgs::msg::RobotStatus> online;
   for (const auto & [rid, st] : robots_) {
@@ -1482,6 +1487,11 @@ void FleetManagerNode::assign_pending_tasks()
       "assigned to wp=" + t.waypoint_id, __FILE__, __LINE__, __func__);
     start_navigation(t.assigned_robot_id, t.waypoint_id, t.task_id);
     mark_snapshot_dirty();
+  }
+  };
+
+  if (!occ_resource_conflict) {
+    run_new_task_batch();
   }
 }
 

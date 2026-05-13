@@ -465,7 +465,7 @@ def main() -> int:
     )
     ap.add_argument("--duration", type=float, default=3600.0,
                     help="Max test duration seconds")
-    ap.add_argument("--task-count", type=int, default=200)
+    ap.add_argument("--task-count", type=int, default=100)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--poll-interval", type=float, default=0.25)
     ap.add_argument("--submit-burst-interval", type=float, default=2.5)
