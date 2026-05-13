@@ -529,9 +529,19 @@ void FleetManagerNode::assign_pending_tasks()
     if (active_task_id.empty()) return false;
     fleet_msgs::msg::TaskInfo ti = scheduler_->get_task_info(active_task_id);
     if (ti.task_id.empty() || ti.assigned_robot_id.empty()) return false;
+    // 尚未进入导航: idle 是调度/避让/优先级 hold 的预期态,不能当作卡死,
+    // 否则会误触发 target_active_defer_exhausted 把等待方任务 fail 掉。
+    if (ti.status == "assigned") return false;
+    if (task_waits_.count(active_task_id)) return false;
     auto it = navs_.find(ti.assigned_robot_id);
     if (it == navs_.end() || !it->second) return true;  // 没 nav 实例视为卡
     const auto & ani = it->second;
+    if (ani->aligning_before_nav) return false;
+    if (ani->retry_after.nanoseconds() > 0 && now < ani->retry_after) return false;
+    if (ani->current_task_id == active_task_id && !ani->route.empty()) return false;
+    for (const auto & pr : waiting_for_) {
+      if (pr.second.count(ti.assigned_robot_id)) return false;  // hop 等待阻塞者,非卡死
+    }
     if (ani->has_active_goal) return false;          // nav 在跑
     if (ani->chassis_task_sent) return false;        // chassis 在做
     if (chain_plan_.active &&
